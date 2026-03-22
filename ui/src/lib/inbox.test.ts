@@ -142,6 +142,8 @@ function makeIssue(id: string, isUnreadForMe: boolean): Issue {
     requestDepth: 0,
     billingCode: null,
     assigneeAdapterOverrides: null,
+    orchestrationPolicy: null,
+    orchestrationState: null,
     executionWorkspaceId: null,
     executionWorkspacePreference: null,
     executionWorkspaceSettings: null,

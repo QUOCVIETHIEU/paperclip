@@ -59,6 +59,7 @@ type AdapterType =
   | "claude_local"
   | "codex_local"
   | "gemini_local"
+  | "ollama_local"
   | "opencode_local"
   | "pi_local"
   | "cursor"
@@ -199,6 +200,7 @@ export function OnboardingWizard() {
     adapterType === "claude_local" ||
     adapterType === "codex_local" ||
     adapterType === "gemini_local" ||
+    adapterType === "ollama_local" ||
     adapterType === "opencode_local" ||
     adapterType === "cursor";
   const effectiveAdapterCommand =
@@ -207,6 +209,8 @@ export function OnboardingWizard() {
       ? "codex"
       : adapterType === "gemini_local"
         ? "gemini"
+      : adapterType === "ollama_local"
+      ? "node"
       : adapterType === "cursor"
       ? "agent"
       : adapterType === "opencode_local"
@@ -401,11 +405,13 @@ export function OnboardingWizard() {
     setLoading(true);
     setError(null);
     try {
-      if (adapterType === "opencode_local") {
+      if (adapterType === "opencode_local" || adapterType === "ollama_local") {
         const selectedModelId = model.trim();
         if (!selectedModelId) {
           setError(
-            "OpenCode requires an explicit model in provider/model format."
+            adapterType === "ollama_local"
+              ? "Ollama requires an explicit local model."
+              : "OpenCode requires an explicit model in provider/model format."
           );
           return;
         }
@@ -427,8 +433,10 @@ export function OnboardingWizard() {
         if (!discoveredModels.some((entry) => entry.id === selectedModelId)) {
           setError(
             discoveredModels.length === 0
-              ? "No OpenCode models discovered. Run `opencode models` and authenticate providers."
-              : `Configured OpenCode model is unavailable: ${selectedModelId}`
+              ? adapterType === "ollama_local"
+                ? "No Ollama models discovered. Start Ollama and pull a local model."
+                : "No OpenCode models discovered. Run `opencode models` and authenticate providers."
+              : `Configured model is unavailable: ${selectedModelId}`
           );
           return;
         }
@@ -788,6 +796,12 @@ export function OnboardingWizard() {
                             desc: "Local Gemini agent"
                           },
                           {
+                            value: "ollama_local" as const,
+                            label: "Ollama",
+                            icon: Terminal,
+                            desc: "Local Ollama bridge"
+                          },
+                          {
                             value: "process" as const,
                             label: "Process",
                             icon: Terminal,
@@ -849,6 +863,10 @@ export function OnboardingWizard() {
                                 }
                                 return;
                               }
+                              if (nextType === "ollama_local") {
+                                setModel("");
+                                return;
+                              }
                               setModel("");
                             }}
                           >
@@ -870,6 +888,7 @@ export function OnboardingWizard() {
                   {(adapterType === "claude_local" ||
                     adapterType === "codex_local" ||
                     adapterType === "gemini_local" ||
+                    adapterType === "ollama_local" ||
                     adapterType === "opencode_local" ||
                     adapterType === "pi_local" ||
                     adapterType === "cursor") && (
@@ -913,7 +932,7 @@ export function OnboardingWizard() {
                                 {selectedModel
                                   ? selectedModel.label
                                   : model ||
-                                    (adapterType === "opencode_local"
+                                    (adapterType === "opencode_local" || adapterType === "ollama_local"
                                       ? "Select model (required)"
                                       : "Default")}
                               </span>
@@ -931,7 +950,7 @@ export function OnboardingWizard() {
                               onChange={(e) => setModelSearch(e.target.value)}
                               autoFocus
                             />
-                            {adapterType !== "opencode_local" && (
+                            {adapterType !== "opencode_local" && adapterType !== "ollama_local" && (
                               <button
                                 className={cn(
                                   "flex items-center gap-2 w-full px-2 py-1.5 text-sm rounded hover:bg-accent/50",
@@ -1067,6 +1086,8 @@ export function OnboardingWizard() {
                                 ? `${effectiveAdapterCommand} --output-format json "Respond with hello."`
                               : adapterType === "opencode_local"
                                 ? `${effectiveAdapterCommand} run --format json "Respond with hello."`
+                              : adapterType === "ollama_local"
+                                ? `curl -s ${(url.trim() || "http://127.0.0.1:11434")}/api/tags`
                               : `${effectiveAdapterCommand} --print - --output-format stream-json --verbose`}
                           </p>
                           <p className="text-muted-foreground">
@@ -1097,6 +1118,11 @@ export function OnboardingWizard() {
                                       : "opencode auth login"}
                               </span>
                               .
+                            </p>
+                          ) : adapterType === "ollama_local" ? (
+                            <p className="text-muted-foreground">
+                              Ensure Ollama is running locally and pull the selected model with{" "}
+                              <span className="font-mono">ollama pull &lt;model&gt;</span>.
                             </p>
                           ) : (
                             <p className="text-muted-foreground">

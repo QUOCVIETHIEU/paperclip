@@ -27,6 +27,33 @@ export const issueAssigneeAdapterOverridesSchema = z
   })
   .strict();
 
+export const issueBenchmarkPolicySchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    assigneeMode: z.enum(["parent_assignee", "creator_agent"]).optional(),
+    maxRetries: z.number().int().min(0).max(20).optional(),
+    instructions: z.string().max(4000).optional().nullable(),
+  })
+  .strict();
+
+export const issueOrchestrationPolicySchema = z
+  .object({
+    delegationMode: z.enum(["manual", "auto_direct_reports"]).optional(),
+    benchmark: issueBenchmarkPolicySchema.optional().nullable(),
+  })
+  .strict();
+
+export const issueOrchestrationStateSchema = z
+  .object({
+    benchmarkStatus: z.enum(["idle", "pending", "passed", "failed"]).optional(),
+    benchmarkAttempts: z.number().int().min(0).max(1000).optional(),
+    lastBenchmarkIssueId: z.string().uuid().optional().nullable(),
+    benchmarkSourceIssueId: z.string().uuid().optional().nullable(),
+    benchmarkAttempt: z.number().int().min(1).max(1000).optional().nullable(),
+    benchmarkMaxRetries: z.number().int().min(0).max(20).optional().nullable(),
+  })
+  .strict();
+
 export const createIssueSchema = z.object({
   projectId: z.string().uuid().optional().nullable(),
   projectWorkspaceId: z.string().uuid().optional().nullable(),
@@ -41,6 +68,7 @@ export const createIssueSchema = z.object({
   requestDepth: z.number().int().nonnegative().optional().default(0),
   billingCode: z.string().optional().nullable(),
   assigneeAdapterOverrides: issueAssigneeAdapterOverridesSchema.optional().nullable(),
+  orchestrationPolicy: issueOrchestrationPolicySchema.optional().nullable(),
   executionWorkspaceId: z.string().uuid().optional().nullable(),
   executionWorkspacePreference: z.enum([
     "inherit",
@@ -70,6 +98,8 @@ export const updateIssueSchema = createIssueSchema.partial().extend({
 
 export type UpdateIssue = z.infer<typeof updateIssueSchema>;
 export type IssueExecutionWorkspaceSettings = z.infer<typeof issueExecutionWorkspaceSettingsSchema>;
+export type IssueOrchestrationPolicy = z.infer<typeof issueOrchestrationPolicySchema>;
+export type IssueOrchestrationState = z.infer<typeof issueOrchestrationStateSchema>;
 
 export const checkoutIssueSchema = z.object({
   agentId: z.string().uuid(),

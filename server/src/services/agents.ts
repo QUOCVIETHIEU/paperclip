@@ -381,6 +381,23 @@ export function agentService(db: Db) {
 
     getById,
 
+    listDirectReports: async (managerId: string) => {
+      const manager = await getById(managerId);
+      if (!manager) return [];
+      const rows = await db
+        .select()
+        .from(agents)
+        .where(
+          and(
+            eq(agents.companyId, manager.companyId),
+            eq(agents.reportsTo, managerId),
+            ne(agents.status, "terminated"),
+          ),
+        );
+      const hydrated = await hydrateAgentSpend(rows);
+      return hydrated.map(normalizeAgentRow);
+    },
+
     create: async (companyId: string, data: Omit<typeof agents.$inferInsert, "companyId">) => {
       if (data.reportsTo) {
         await ensureManager(companyId, data.reportsTo);

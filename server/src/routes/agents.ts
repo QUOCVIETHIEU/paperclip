@@ -50,6 +50,7 @@ export function agentRoutes(db: Db) {
     claude_local: "instructionsFilePath",
     codex_local: "instructionsFilePath",
     gemini_local: "instructionsFilePath",
+    ollama_local: "instructionsFilePath",
     opencode_local: "instructionsFilePath",
     cursor: "instructionsFilePath",
   };

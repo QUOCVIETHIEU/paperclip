@@ -74,6 +74,10 @@ const ADAPTER_DEFAULT_RULES_BY_TYPE: Record<string, Array<{ path: string[]; valu
     { path: ["timeoutSec"], value: 0 },
     { path: ["graceSec"], value: 15 },
   ],
+  ollama_local: [
+    { path: ["timeoutSec"], value: 0 },
+    { path: ["graceSec"], value: 15 },
+  ],
   opencode_local: [
     { path: ["timeoutSec"], value: 0 },
     { path: ["graceSec"], value: 15 },

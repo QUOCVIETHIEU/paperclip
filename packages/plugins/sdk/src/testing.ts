@@ -373,6 +373,8 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
           requestDepth: 0,
           billingCode: null,
           assigneeAdapterOverrides: null,
+          orchestrationPolicy: null,
+          orchestrationState: null,
           executionWorkspaceId: null,
           executionWorkspacePreference: null,
           executionWorkspaceSettings: null,

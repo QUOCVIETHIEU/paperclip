@@ -19,13 +19,20 @@ import { validate } from "../middleware/validate.js";
 import {
   accessService,
   agentService,
+  buildDefaultManagerIssueOrchestrationPolicy,
+  buildBenchmarkIssueTitle,
   executionWorkspaceService,
+  findAutoDelegationAssignee,
   goalService,
   heartbeatService,
   issueApprovalService,
+  parseIssueOrchestrationPolicy,
+  parseIssueOrchestrationState,
   issueService,
   documentService,
   logActivity,
+  parseManagerAutonomyConfig,
+  planIssueStatusOrchestration,
   projectService,
   workProductService,
 } from "../services/index.js";
@@ -93,6 +100,17 @@ export function issueRoutes(db: Db, storage: StorageService) {
     return Boolean((agent.permissions as Record<string, unknown>).canCreateAgents);
   }
 
+  async function inferDefaultManagerOrchestrationPolicy(agentId: string | null | undefined) {
+    if (!agentId) return null;
+    const manager = await agentsSvc.getById(agentId);
+    if (!manager) return null;
+    const directReports = await agentsSvc.listDirectReports(agentId);
+    const config = parseManagerAutonomyConfig(manager.runtimeConfig, {
+      hasDirectReports: directReports.length > 0,
+    });
+    return buildDefaultManagerIssueOrchestrationPolicy(config);
+  }
+
   async function assertCanAssignTasks(req: Request, companyId: string) {
     assertCompanyAccess(req, companyId);
     if (req.actor.type === "board") {
@@ -118,6 +136,177 @@ export function issueRoutes(db: Db, storage: StorageService) {
     if (runId) return runId;
     res.status(401).json({ error: "Agent run id required" });
     return null;
+  }
+
+  async function wakeAgentForOrchestration(agentId: string, issueId: string, reason: string, contextSource: string) {
+    await heartbeat.wakeup(agentId, {
+      source: "automation",
+      triggerDetail: "system",
+      reason,
+      payload: { issueId, mutation: "orchestration" },
+      requestedByActorType: "system",
+      requestedByActorId: "system",
+      contextSnapshot: { issueId, source: contextSource, wakeReason: reason },
+    });
+  }
+
+  async function applyIssueStatusOrchestration(
+    previousIssue: Awaited<ReturnType<typeof svc.getById>>,
+    currentIssue: NonNullable<Awaited<ReturnType<typeof svc.getById>>>,
+  ) {
+    if (!previousIssue) return currentIssue;
+
+    const parentIssue = currentIssue.parentId ? await svc.getById(currentIssue.parentId) : null;
+    const plan = planIssueStatusOrchestration({
+      previousStatus: previousIssue.status,
+      currentIssue,
+      parentIssue,
+    });
+    if (!plan) return currentIssue;
+
+    if (plan.kind === "create_benchmark") {
+      const benchmarkIssue = await svc.create(currentIssue.companyId, {
+        projectId: currentIssue.projectId,
+        projectWorkspaceId: currentIssue.projectWorkspaceId,
+        goalId: currentIssue.goalId,
+        parentId: currentIssue.id,
+        title: buildBenchmarkIssueTitle(currentIssue.title),
+        description: [
+          `Evaluate whether issue ${currentIssue.identifier ?? currentIssue.id} reached the expected result.`,
+          plan.instructions ? `Benchmark criteria:\n${plan.instructions}` : null,
+        ].filter(Boolean).join("\n\n"),
+        status: "todo",
+        priority: currentIssue.priority,
+        assigneeAgentId: plan.evaluatorAgentId,
+        requestDepth: currentIssue.requestDepth + 1,
+        createdByAgentId: parentIssue?.assigneeAgentId ?? currentIssue.createdByAgentId ?? null,
+        orchestrationState: {
+          benchmarkSourceIssueId: currentIssue.id,
+          benchmarkAttempt: plan.attempt,
+          benchmarkMaxRetries: plan.maxRetries,
+        },
+      });
+
+      const sourceState = parseIssueOrchestrationState(currentIssue.orchestrationState);
+      const sourceIssue = await svc.update(currentIssue.id, {
+        status: "in_review",
+        orchestrationState: {
+          ...sourceState,
+          benchmarkStatus: "pending",
+          benchmarkAttempts: plan.attempt,
+          lastBenchmarkIssueId: benchmarkIssue.id,
+        },
+      });
+
+      await logActivity(db, {
+        companyId: benchmarkIssue.companyId,
+        actorType: "system",
+        actorId: "system",
+        action: "issue.created",
+        entityType: "issue",
+        entityId: benchmarkIssue.id,
+        details: {
+          title: benchmarkIssue.title,
+          identifier: benchmarkIssue.identifier,
+          sourceIssueId: currentIssue.id,
+          benchmark: true,
+          benchmarkAttempt: plan.attempt,
+        },
+      });
+
+      await logActivity(db, {
+        companyId: currentIssue.companyId,
+        actorType: "system",
+        actorId: "system",
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: currentIssue.id,
+        details: {
+          status: "in_review",
+          source: "orchestration.benchmark_pending",
+          benchmarkIssueId: benchmarkIssue.id,
+          benchmarkAttempt: plan.attempt,
+          _previous: { status: currentIssue.status },
+        },
+      });
+
+      await svc.addComment(currentIssue.id, `Benchmark queued in ${benchmarkIssue.identifier ?? benchmarkIssue.id}.`, {});
+      await wakeAgentForOrchestration(plan.evaluatorAgentId, benchmarkIssue.id, "issue_assigned", "issue.orchestration.benchmark");
+      return sourceIssue ?? currentIssue;
+    }
+
+    const sourceIssue = await svc.getById(plan.sourceIssueId);
+    if (!sourceIssue) return currentIssue;
+    const sourceState = parseIssueOrchestrationState(sourceIssue.orchestrationState);
+
+    if (plan.outcome === "pass") {
+      await svc.update(sourceIssue.id, {
+        status: "done",
+        orchestrationState: {
+          ...sourceState,
+          benchmarkStatus: "passed",
+          lastBenchmarkIssueId: currentIssue.id,
+        },
+      });
+      await svc.addComment(
+        sourceIssue.id,
+        `Benchmark passed in ${currentIssue.identifier ?? currentIssue.id}.`,
+        {},
+      );
+      await logActivity(db, {
+        companyId: sourceIssue.companyId,
+        actorType: "system",
+        actorId: "system",
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: sourceIssue.id,
+        details: {
+          status: "done",
+          source: "orchestration.benchmark_passed",
+          benchmarkIssueId: currentIssue.id,
+          _previous: { status: sourceIssue.status },
+        },
+      });
+      return currentIssue;
+    }
+
+    const nextStatus = plan.outcome === "retry" ? "todo" : "blocked";
+    await svc.update(sourceIssue.id, {
+      status: nextStatus,
+      orchestrationState: {
+        ...sourceState,
+        benchmarkStatus: "failed",
+        lastBenchmarkIssueId: currentIssue.id,
+      },
+    });
+
+    await svc.addComment(
+      sourceIssue.id,
+      plan.outcome === "retry"
+        ? `Benchmark failed in ${currentIssue.identifier ?? currentIssue.id}. Task was reopened for retry ${plan.attempt}/${plan.maxRetries}.`
+        : `Benchmark failed in ${currentIssue.identifier ?? currentIssue.id}. Max retries reached; task is now blocked.`,
+      {},
+    );
+    await logActivity(db, {
+      companyId: sourceIssue.companyId,
+      actorType: "system",
+      actorId: "system",
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: sourceIssue.id,
+      details: {
+        status: nextStatus,
+        source: "orchestration.benchmark_failed",
+        benchmarkIssueId: currentIssue.id,
+        benchmarkAttempt: plan.attempt,
+        benchmarkMaxRetries: plan.maxRetries,
+        _previous: { status: sourceIssue.status },
+      },
+    });
+    if (plan.outcome === "retry" && sourceIssue.assigneeAgentId) {
+      await wakeAgentForOrchestration(sourceIssue.assigneeAgentId, sourceIssue.id, "issue_reopened_via_benchmark", "issue.orchestration.retry");
+    }
+    return currentIssue;
   }
 
   async function assertAgentRunCheckoutOwnership(
@@ -752,16 +941,48 @@ export function issueRoutes(db: Db, storage: StorageService) {
   router.post("/companies/:companyId/issues", validate(createIssueSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
-    if (req.body.assigneeAgentId || req.body.assigneeUserId) {
-      await assertCanAssignTasks(req, companyId);
-    }
-
     const actor = getActorInfo(req);
-    const issue = await svc.create(companyId, {
+    const createInput = {
       ...req.body,
       createdByAgentId: actor.agentId,
       createdByUserId: actor.actorType === "user" ? actor.actorId : null,
-    });
+    };
+
+    if (
+      !createInput.assigneeAgentId &&
+      !createInput.assigneeUserId &&
+      createInput.parentId &&
+      actor.agentId
+    ) {
+      const parentIssue = await svc.getById(createInput.parentId);
+      const parentPolicy = parseIssueOrchestrationPolicy(parentIssue?.orchestrationPolicy);
+      if (
+        parentIssue &&
+        parentIssue.companyId === companyId &&
+        parentIssue.assigneeAgentId === actor.agentId &&
+        parentPolicy?.delegationMode === "auto_direct_reports"
+      ) {
+        const delegatedAssignee = await findAutoDelegationAssignee(db, companyId, actor.agentId);
+        if (delegatedAssignee) {
+          createInput.assigneeAgentId = delegatedAssignee.id;
+        }
+      }
+    }
+
+    if (createInput.orchestrationPolicy === undefined) {
+      const defaultManagerAssigneeId =
+        createInput.assigneeAgentId ??
+        (!createInput.assigneeUserId ? actor.agentId ?? null : null);
+      const inferredPolicy = await inferDefaultManagerOrchestrationPolicy(defaultManagerAssigneeId);
+      if (inferredPolicy) {
+        createInput.orchestrationPolicy = inferredPolicy;
+      }
+    }
+
+    if (createInput.assigneeAgentId || createInput.assigneeUserId) {
+      await assertCanAssignTasks(req, companyId);
+    }
+    const issue = await svc.create(companyId, createInput);
 
     await logActivity(db, {
       companyId,
@@ -823,6 +1044,22 @@ export function issueRoutes(db: Db, storage: StorageService) {
     const { comment: commentBody, hiddenAt: hiddenAtRaw, ...updateFields } = req.body;
     if (hiddenAtRaw !== undefined) {
       updateFields.hiddenAt = hiddenAtRaw ? new Date(hiddenAtRaw) : null;
+    }
+    if (
+      assigneeWillChange &&
+      updateFields.orchestrationPolicy === undefined &&
+      !existing.orchestrationPolicy
+    ) {
+      const nextAssigneeAgentId =
+        updateFields.assigneeAgentId === undefined ? existing.assigneeAgentId : updateFields.assigneeAgentId;
+      const nextAssigneeUserId =
+        updateFields.assigneeUserId === undefined ? existing.assigneeUserId : updateFields.assigneeUserId;
+      if (nextAssigneeAgentId && !nextAssigneeUserId) {
+        const inferredPolicy = await inferDefaultManagerOrchestrationPolicy(nextAssigneeAgentId);
+        if (inferredPolicy) {
+          updateFields.orchestrationPolicy = inferredPolicy;
+        }
+      }
     }
     let issue;
     try {
@@ -909,6 +1146,8 @@ export function issueRoutes(db: Db, storage: StorageService) {
       });
 
     }
+
+    issue = await applyIssueStatusOrchestration(existing, issue);
 
     const assigneeChanged = assigneeWillChange;
     const statusChangedFromBacklog =

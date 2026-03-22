@@ -245,11 +245,32 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
     }
     if (Object.keys(overlay.heartbeat).length > 0) {
       const existingRc = (agent.runtimeConfig ?? {}) as Record<string, unknown>;
+      const pendingRc =
+        patch.runtimeConfig && typeof patch.runtimeConfig === "object"
+          ? patch.runtimeConfig as Record<string, unknown>
+          : {};
+      const pendingHb =
+        pendingRc.heartbeat && typeof pendingRc.heartbeat === "object"
+          ? pendingRc.heartbeat as Record<string, unknown>
+          : {};
       const existingHb = (existingRc.heartbeat ?? {}) as Record<string, unknown>;
-      patch.runtimeConfig = { ...existingRc, heartbeat: { ...existingHb, ...overlay.heartbeat } };
+      patch.runtimeConfig = {
+        ...existingRc,
+        ...pendingRc,
+        heartbeat: { ...existingHb, ...pendingHb, ...overlay.heartbeat },
+      };
     }
     if (Object.keys(overlay.runtime).length > 0) {
-      Object.assign(patch, overlay.runtime);
+      const existingRc = (agent.runtimeConfig ?? {}) as Record<string, unknown>;
+      const pendingRc =
+        patch.runtimeConfig && typeof patch.runtimeConfig === "object"
+          ? patch.runtimeConfig as Record<string, unknown>
+          : {};
+      patch.runtimeConfig = {
+        ...existingRc,
+        ...pendingRc,
+        ...overlay.runtime,
+      };
     }
 
     props.onSave(patch);
@@ -276,6 +297,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
   const config = !isCreate ? ((props.agent.adapterConfig ?? {}) as Record<string, unknown>) : {};
   const runtimeConfig = !isCreate ? ((props.agent.runtimeConfig ?? {}) as Record<string, unknown>) : {};
   const heartbeat = !isCreate ? ((runtimeConfig.heartbeat ?? {}) as Record<string, unknown>) : {};
+  const managerAutonomy = !isCreate ? ((runtimeConfig.managerAutonomy ?? {}) as Record<string, unknown>) : {};
 
   const adapterType = isCreate
     ? props.values.adapterType
@@ -284,6 +306,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
     adapterType === "claude_local" ||
     adapterType === "codex_local" ||
     adapterType === "gemini_local" ||
+    adapterType === "ollama_local" ||
     adapterType === "opencode_local" ||
     adapterType === "cursor";
   const uiAdapter = useMemo(() => getUIAdapter(adapterType), [adapterType]);
@@ -389,6 +412,14 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
         heartbeat: {
           enabled: val!.heartbeatEnabled,
           intervalSec: val!.intervalSec,
+        },
+        managerAutonomy: {
+          enabled: val!.managerAutonomyEnabled,
+          injectPrompt: val!.managerAutonomyInjectPrompt,
+          delegationMode: "auto_direct_reports",
+          benchmarkEnabled: val!.managerBenchmarkEnabled,
+          benchmarkAssigneeMode: "parent_assignee",
+          benchmarkMaxRetries: val!.managerBenchmarkMaxRetries,
         },
       };
     }
@@ -523,6 +554,8 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                       DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX;
                   } else if (t === "gemini_local") {
                     nextValues.model = DEFAULT_GEMINI_LOCAL_MODEL;
+                  } else if (t === "ollama_local") {
+                    nextValues.model = "";
                   } else if (t === "cursor") {
                     nextValues.model = DEFAULT_CURSOR_LOCAL_MODEL;
                   } else if (t === "opencode_local") {
@@ -541,6 +574,8 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                           ? DEFAULT_CODEX_LOCAL_MODEL
                           : t === "gemini_local"
                             ? DEFAULT_GEMINI_LOCAL_MODEL
+                          : t === "ollama_local"
+                            ? ""
                           : t === "cursor"
                             ? DEFAULT_CURSOR_LOCAL_MODEL
                           : "",
@@ -653,7 +688,9 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                       ? "codex"
                       : adapterType === "gemini_local"
                         ? "gemini"
-                      : adapterType === "cursor"
+                        : adapterType === "ollama_local"
+                          ? "node"
+                        : adapterType === "cursor"
                         ? "agent"
                         : adapterType === "opencode_local"
                           ? "opencode"
@@ -673,7 +710,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                 open={modelOpen}
                 onOpenChange={setModelOpen}
                 allowDefault={adapterType !== "opencode_local"}
-                required={adapterType === "opencode_local"}
+                required={adapterType === "opencode_local" || adapterType === "ollama_local"}
                 groupByProvider={adapterType === "opencode_local"}
               />
               {fetchedModelsError && (
@@ -828,6 +865,34 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
               numberHint={help.intervalSec}
               showNumber={val!.heartbeatEnabled}
             />
+            <ToggleField
+              label="Manager autonomy"
+              hint={help.managerAutonomy}
+              checked={val!.managerAutonomyEnabled}
+              onChange={(v) => set!({ managerAutonomyEnabled: v })}
+            />
+            {val!.managerAutonomyEnabled && (
+              <>
+                <ToggleField
+                  label="Inject manager prompt"
+                  hint={help.managerAutonomyInjectPrompt}
+                  checked={val!.managerAutonomyInjectPrompt}
+                  onChange={(v) => set!({ managerAutonomyInjectPrompt: v })}
+                />
+                <ToggleWithNumber
+                  label="Benchmark delegated work"
+                  hint={help.managerBenchmark}
+                  checked={val!.managerBenchmarkEnabled}
+                  onCheckedChange={(v) => set!({ managerBenchmarkEnabled: v })}
+                  number={val!.managerBenchmarkMaxRetries}
+                  onNumberChange={(v) => set!({ managerBenchmarkMaxRetries: v })}
+                  numberLabel="retries"
+                  numberPrefix="Retry up to"
+                  numberHint={help.managerBenchmarkMaxRetries}
+                  showNumber={val!.managerBenchmarkEnabled}
+                />
+              </>
+            )}
           </div>
         </div>
       ) : (
@@ -838,6 +903,16 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
           }
           <div className={cn(cards ? "border border-border rounded-lg overflow-hidden" : "")}>
             <div className={cn(cards ? "p-4 space-y-3" : "px-4 pb-3 space-y-3")}>
+              {(() => {
+                const effectiveManagerAutonomy = eff(
+                  "runtime",
+                  "managerAutonomy",
+                  managerAutonomy,
+                ) as Record<string, unknown>;
+                const managerAutonomyEnabled = effectiveManagerAutonomy.enabled !== false;
+                const managerBenchmarkEnabled = effectiveManagerAutonomy.benchmarkEnabled !== false;
+                return (
+                  <>
               <ToggleWithNumber
                 label="Heartbeat on interval"
                 hint={help.heartbeatInterval}
@@ -850,6 +925,65 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                 numberHint={help.intervalSec}
                 showNumber={eff("heartbeat", "enabled", heartbeat.enabled !== false)}
               />
+                    <ToggleField
+                      label="Manager autonomy"
+                      hint={help.managerAutonomy}
+                      checked={managerAutonomyEnabled}
+                      onChange={(v) =>
+                        mark("runtime", "managerAutonomy", {
+                          ...effectiveManagerAutonomy,
+                          enabled: v,
+                          delegationMode: "auto_direct_reports",
+                          benchmarkAssigneeMode: "parent_assignee",
+                        })
+                      }
+                    />
+                    {managerAutonomyEnabled && (
+                      <>
+                        <ToggleField
+                          label="Inject manager prompt"
+                          hint={help.managerAutonomyInjectPrompt}
+                          checked={effectiveManagerAutonomy.injectPrompt !== false}
+                          onChange={(v) =>
+                            mark("runtime", "managerAutonomy", {
+                              ...effectiveManagerAutonomy,
+                              injectPrompt: v,
+                              delegationMode: "auto_direct_reports",
+                              benchmarkAssigneeMode: "parent_assignee",
+                            })
+                          }
+                        />
+                        <ToggleWithNumber
+                          label="Benchmark delegated work"
+                          hint={help.managerBenchmark}
+                          checked={managerBenchmarkEnabled}
+                          onCheckedChange={(v) =>
+                            mark("runtime", "managerAutonomy", {
+                              ...effectiveManagerAutonomy,
+                              benchmarkEnabled: v,
+                              delegationMode: "auto_direct_reports",
+                              benchmarkAssigneeMode: "parent_assignee",
+                            })
+                          }
+                          number={Number(effectiveManagerAutonomy.benchmarkMaxRetries ?? 1)}
+                          onNumberChange={(v) =>
+                            mark("runtime", "managerAutonomy", {
+                              ...effectiveManagerAutonomy,
+                              benchmarkMaxRetries: v,
+                              delegationMode: "auto_direct_reports",
+                              benchmarkAssigneeMode: "parent_assignee",
+                            })
+                          }
+                          numberLabel="retries"
+                          numberPrefix="Retry up to"
+                          numberHint={help.managerBenchmarkMaxRetries}
+                          showNumber={managerBenchmarkEnabled}
+                        />
+                      </>
+                    )}
+                  </>
+                );
+              })()}
             </div>
             <CollapsibleSection
               title="Advanced Run Policy"
@@ -939,7 +1073,7 @@ function AdapterEnvironmentResult({ result }: { result: AdapterEnvironmentTestRe
 
 /* ---- Internal sub-components ---- */
 
-const ENABLED_ADAPTER_TYPES = new Set(["claude_local", "codex_local", "gemini_local", "opencode_local", "pi_local", "cursor"]);
+const ENABLED_ADAPTER_TYPES = new Set(["claude_local", "codex_local", "gemini_local", "ollama_local", "opencode_local", "pi_local", "cursor"]);
 
 /** Display list includes all real adapter types plus UI-only coming-soon entries. */
 const ADAPTER_DISPLAY_LIST: { value: string; label: string; comingSoon: boolean }[] = [

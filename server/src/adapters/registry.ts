@@ -63,6 +63,7 @@ import {
   agentConfigurationDoc as hermesAgentConfigurationDoc,
   models as hermesModels,
 } from "hermes-paperclip-adapter";
+import { ollamaLocalAdapter } from "./ollama-local/index.js";
 import { processAdapter } from "./process/index.js";
 import { httpAdapter } from "./http/index.js";
 
@@ -161,6 +162,7 @@ const adaptersByType = new Map<string, ServerAdapterModule>(
   [
     claudeLocalAdapter,
     codexLocalAdapter,
+    ollamaLocalAdapter,
     openCodeLocalAdapter,
     piLocalAdapter,
     cursorLocalAdapter,

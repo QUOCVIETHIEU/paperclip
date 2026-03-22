@@ -24,7 +24,7 @@ export const help: Record<string, string> = {
   role: "Organizational role. Determines position and capabilities.",
   reportsTo: "The agent this one reports to in the org hierarchy.",
   capabilities: "Describes what this agent can do. Shown in the org chart and used for task routing.",
-  adapterType: "How this agent runs: local CLI (Claude/Codex/OpenCode), OpenClaw Gateway, spawned process, or generic HTTP webhook.",
+  adapterType: "How this agent runs: local CLI/runtime (Claude/Codex/OpenCode/Ollama), OpenClaw Gateway, spawned process, or generic HTTP webhook.",
   cwd: "Default working directory fallback for local adapters. Use an absolute path on the machine running Paperclip.",
   promptTemplate: "Sent on every heartbeat. Keep this small and dynamic. Use it for current-task framing, not large static instructions. Supports {{ agent.id }}, {{ agent.name }}, {{ agent.role }} and other template variables.",
   model: "Override the default model used by the adapter.",
@@ -54,6 +54,10 @@ export const help: Record<string, string> = {
   wakeOnDemand: "Allow this agent to be woken by assignments, API calls, UI actions, or automated systems.",
   cooldownSec: "Minimum seconds between consecutive heartbeat runs.",
   maxConcurrentRuns: "Maximum number of heartbeat runs that can execute simultaneously for this agent.",
+  managerAutonomy: "When enabled, manager agents with direct reports are expected to decompose large work, delegate child issues, and let Paperclip orchestrate the review loop automatically.",
+  managerAutonomyInjectPrompt: "Inject delegation guidance into heartbeat prompts so a manager agent knows it should coordinate through child issues instead of doing every leaf task itself.",
+  managerBenchmark: "Automatically benchmark delegated work before the parent issue is accepted.",
+  managerBenchmarkMaxRetries: "Maximum number of reopen-and-retry cycles after a failed delegated benchmark.",
   budgetMonthlyCents: "Monthly spending limit in cents. 0 means no limit.",
 };
 
@@ -61,6 +65,7 @@ export const adapterLabels: Record<string, string> = {
   claude_local: "Claude (local)",
   codex_local: "Codex (local)",
   gemini_local: "Gemini CLI (local)",
+  ollama_local: "Ollama (local)",
   opencode_local: "OpenCode (local)",
   openclaw_gateway: "OpenClaw Gateway",
   cursor: "Cursor (local)",

@@ -1,9 +1,23 @@
 export { companyService } from "./companies.js";
+export {
+  buildDefaultManagerIssueOrchestrationPolicy,
+  buildManagerAutonomyPrompt,
+  parseManagerAutonomyConfig,
+  type ManagerAutonomyConfig,
+} from "./agent-autonomy.js";
 export { agentService, deduplicateAgentName } from "./agents.js";
 export { assetService } from "./assets.js";
 export { documentService, extractLegacyPlanBody } from "./documents.js";
 export { projectService } from "./projects.js";
 export { issueService, type IssueFilters } from "./issues.js";
+export {
+  buildBenchmarkIssueTitle,
+  findAutoDelegationAssignee,
+  parseIssueOrchestrationPolicy,
+  parseIssueOrchestrationState,
+  pickAutoDelegationCandidate,
+  planIssueStatusOrchestration,
+} from "./issue-orchestration.js";
 export { issueApprovalService } from "./issue-approvals.js";
 export { goalService } from "./goals.js";
 export { activityService, type ActivityFilters } from "./activity.js";

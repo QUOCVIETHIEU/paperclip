@@ -30,6 +30,7 @@ const SUPPORTED_ADVANCED_ADAPTER_TYPES = new Set<CreateConfigValues["adapterType
   "claude_local",
   "codex_local",
   "gemini_local",
+  "ollama_local",
   "opencode_local",
   "pi_local",
   "cursor",
@@ -47,6 +48,8 @@ function createValuesForAdapterType(
       DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX;
   } else if (adapterType === "gemini_local") {
     nextValues.model = DEFAULT_GEMINI_LOCAL_MODEL;
+  } else if (adapterType === "ollama_local") {
+    nextValues.model = "";
   } else if (adapterType === "cursor") {
     nextValues.model = DEFAULT_CURSOR_LOCAL_MODEL;
   } else if (adapterType === "opencode_local") {
@@ -141,10 +144,14 @@ export function NewAgent() {
   function handleSubmit() {
     if (!selectedCompanyId || !name.trim()) return;
     setFormError(null);
-    if (configValues.adapterType === "opencode_local") {
+    if (configValues.adapterType === "opencode_local" || configValues.adapterType === "ollama_local") {
       const selectedModel = configValues.model.trim();
       if (!selectedModel) {
-        setFormError("OpenCode requires an explicit model in provider/model format.");
+        setFormError(
+          configValues.adapterType === "ollama_local"
+            ? "Ollama requires an explicit local model."
+            : "OpenCode requires an explicit model in provider/model format.",
+        );
         return;
       }
       if (adapterModelsError) {
@@ -163,8 +170,10 @@ export function NewAgent() {
       if (!discovered.some((entry) => entry.id === selectedModel)) {
         setFormError(
           discovered.length === 0
-            ? "No OpenCode models discovered. Run `opencode models` and authenticate providers."
-            : `Configured OpenCode model is unavailable: ${selectedModel}`,
+            ? configValues.adapterType === "ollama_local"
+              ? "No Ollama models discovered. Start Ollama and pull a local model."
+              : "No OpenCode models discovered. Run `opencode models` and authenticate providers."
+            : `Configured model is unavailable: ${selectedModel}`,
         );
         return;
       }
@@ -183,6 +192,14 @@ export function NewAgent() {
           wakeOnDemand: true,
           cooldownSec: 10,
           maxConcurrentRuns: 1,
+        },
+        managerAutonomy: {
+          enabled: configValues.managerAutonomyEnabled,
+          injectPrompt: configValues.managerAutonomyInjectPrompt,
+          delegationMode: "auto_direct_reports",
+          benchmarkEnabled: configValues.managerBenchmarkEnabled,
+          benchmarkAssigneeMode: "parent_assignee",
+          benchmarkMaxRetries: configValues.managerBenchmarkMaxRetries,
         },
       },
       budgetMonthlyCents: 0,

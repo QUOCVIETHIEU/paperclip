@@ -50,6 +50,8 @@ import {
 } from "./execution-workspace-policy.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { redactCurrentUserText, redactCurrentUserValue } from "../log-redaction.js";
+import { agentService } from "./agents.js";
+import { buildManagerAutonomyPrompt, parseManagerAutonomyConfig } from "./agent-autonomy.js";
 import {
   hasSessionCompactionThresholds,
   resolveSessionCompactionPolicy,
@@ -698,6 +700,7 @@ export function heartbeatService(db: Db) {
 
   const runLogStore = getRunLogStore();
   const secretsSvc = secretService(db);
+  const agentsSvc = agentService(db);
   const issuesSvc = issueService(db);
   const executionWorkspacesSvc = executionWorkspaceService(db);
   const workspaceOperationsSvc = workspaceOperationService(db);
@@ -1911,6 +1914,37 @@ export function heartbeatService(db: Db) {
       agentHome: resolveDefaultAgentWorkspaceDir(agent.id),
     };
     context.paperclipWorkspaces = resolvedWorkspace.workspaceHints;
+    const directReports = await agentsSvc.listDirectReports(agent.id);
+    if (directReports.length > 0) {
+      const managerAutonomy = parseManagerAutonomyConfig(agent.runtimeConfig, {
+        hasDirectReports: true,
+      });
+      context.paperclipOrg = {
+        hasDirectReports: true,
+        directReports: directReports.map((report) => ({
+          id: report.id,
+          name: report.name,
+          role: report.role,
+          title: report.title,
+          capabilities: report.capabilities,
+        })),
+      };
+      context.paperclipManagerAutonomy = managerAutonomy;
+      const managerInstructions = buildManagerAutonomyPrompt({
+        agent,
+        directReports,
+        config: managerAutonomy,
+      });
+      if (managerInstructions) {
+        context.paperclipManagerInstructions = managerInstructions;
+      } else {
+        delete context.paperclipManagerInstructions;
+      }
+    } else {
+      delete context.paperclipOrg;
+      delete context.paperclipManagerAutonomy;
+      delete context.paperclipManagerInstructions;
+    }
     const runtimeServiceIntents = (() => {
       const runtimeConfig = parseObject(resolvedConfig.workspaceRuntime);
       return Array.isArray(runtimeConfig.services)

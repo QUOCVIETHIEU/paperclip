@@ -295,4 +295,8 @@ export interface CreateConfigValues {
   maxTurnsPerRun: number;
   heartbeatEnabled: boolean;
   intervalSec: number;
+  managerAutonomyEnabled: boolean;
+  managerAutonomyInjectPrompt: boolean;
+  managerBenchmarkEnabled: boolean;
+  managerBenchmarkMaxRetries: number;
 }

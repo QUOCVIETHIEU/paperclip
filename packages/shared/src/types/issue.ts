@@ -51,6 +51,31 @@ export interface IssueAssigneeAdapterOverrides {
   useProjectWorkspace?: boolean;
 }
 
+export type IssueDelegationMode = "manual" | "auto_direct_reports";
+export type IssueBenchmarkAssigneeMode = "parent_assignee" | "creator_agent";
+export type IssueBenchmarkStatus = "idle" | "pending" | "passed" | "failed";
+
+export interface IssueBenchmarkPolicy {
+  enabled?: boolean;
+  assigneeMode?: IssueBenchmarkAssigneeMode;
+  maxRetries?: number;
+  instructions?: string | null;
+}
+
+export interface IssueOrchestrationPolicy {
+  delegationMode?: IssueDelegationMode;
+  benchmark?: IssueBenchmarkPolicy | null;
+}
+
+export interface IssueOrchestrationState {
+  benchmarkStatus?: IssueBenchmarkStatus;
+  benchmarkAttempts?: number;
+  lastBenchmarkIssueId?: string | null;
+  benchmarkSourceIssueId?: string | null;
+  benchmarkAttempt?: number | null;
+  benchmarkMaxRetries?: number | null;
+}
+
 export type DocumentFormat = "markdown";
 
 export interface IssueDocumentSummary {
@@ -119,6 +144,8 @@ export interface Issue {
   requestDepth: number;
   billingCode: string | null;
   assigneeAdapterOverrides: IssueAssigneeAdapterOverrides | null;
+  orchestrationPolicy: IssueOrchestrationPolicy | null;
+  orchestrationState: IssueOrchestrationState | null;
   executionWorkspaceId: string | null;
   executionWorkspacePreference: string | null;
   executionWorkspaceSettings: IssueExecutionWorkspaceSettings | null;

@@ -27,4 +27,8 @@ export const defaultCreateValues: CreateConfigValues = {
   maxTurnsPerRun: 300,
   heartbeatEnabled: false,
   intervalSec: 300,
+  managerAutonomyEnabled: true,
+  managerAutonomyInjectPrompt: true,
+  managerBenchmarkEnabled: true,
+  managerBenchmarkMaxRetries: 1,
 };
