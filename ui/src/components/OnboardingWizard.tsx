@@ -75,6 +75,9 @@ Ensure you have a folder agents/ceo and then download this AGENTS.md, and siblin
 
 After that, hire yourself a Founding Engineer agent and then plan the roadmap and tasks for your new company.`;
 
+const DEFAULT_OLLAMA_BASE_URL = "http://115.78.94.36:11434";
+const DEFAULT_OLLAMA_MODEL = "nemotron-cascade-2";
+
 export function OnboardingWizard() {
   const { onboardingOpen, onboardingOptions, closeOnboarding } = useDialog();
   const { companies, setSelectedCompanyId, loading: companiesLoading } = useCompany();
@@ -311,12 +314,14 @@ export function OnboardingWizard() {
           ? model || DEFAULT_CODEX_LOCAL_MODEL
           : adapterType === "gemini_local"
             ? model || DEFAULT_GEMINI_LOCAL_MODEL
+          : adapterType === "ollama_local"
+            ? model || DEFAULT_OLLAMA_MODEL
           : adapterType === "cursor"
           ? model || DEFAULT_CURSOR_LOCAL_MODEL
           : model,
       command,
       args,
-      url,
+      url: adapterType === "ollama_local" ? url || DEFAULT_OLLAMA_BASE_URL : url,
       dangerouslySkipPermissions: adapterType === "claude_local",
       dangerouslyBypassSandbox:
         adapterType === "codex_local"
@@ -757,6 +762,7 @@ export function OnboardingWizard() {
                             if (nextType !== "codex_local") {
                               setModel("");
                             }
+                            setUrl("");
                           }}
                         >
                           {opt.recommended && (
@@ -861,12 +867,15 @@ export function OnboardingWizard() {
                                 if (!model.includes("/")) {
                                   setModel("");
                                 }
+                                setUrl("");
                                 return;
                               }
                               if (nextType === "ollama_local") {
-                                setModel("");
+                                setModel(DEFAULT_OLLAMA_MODEL);
+                                setUrl(DEFAULT_OLLAMA_BASE_URL);
                                 return;
                               }
+                              setUrl("");
                               setModel("");
                             }}
                           >
@@ -1087,7 +1096,7 @@ export function OnboardingWizard() {
                               : adapterType === "opencode_local"
                                 ? `${effectiveAdapterCommand} run --format json "Respond with hello."`
                               : adapterType === "ollama_local"
-                                ? `curl -s ${(url.trim() || "http://127.0.0.1:11434")}/api/tags`
+                                ? `curl -s ${(url.trim() || DEFAULT_OLLAMA_BASE_URL)}/api/tags`
                               : `${effectiveAdapterCommand} --print - --output-format stream-json --verbose`}
                           </p>
                           <p className="text-muted-foreground">
@@ -1121,7 +1130,7 @@ export function OnboardingWizard() {
                             </p>
                           ) : adapterType === "ollama_local" ? (
                             <p className="text-muted-foreground">
-                              Ensure Ollama is running locally and pull the selected model with{" "}
+                              Ensure Ollama is reachable at the configured URL and the selected model is available. If needed, pull it with{" "}
                               <span className="font-mono">ollama pull &lt;model&gt;</span>.
                             </p>
                           ) : (

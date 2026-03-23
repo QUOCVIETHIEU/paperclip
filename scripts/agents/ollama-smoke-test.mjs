@@ -1,6 +1,6 @@
 const base = process.env.PAPERCLIP_BASE_URL ?? "http://127.0.0.1:3100/api";
-const model = process.env.OLLAMA_MODEL ?? "llama3.1:latest";
-const ollamaBaseUrl = process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434";
+const model = process.env.OLLAMA_MODEL ?? "nemotron-cascade-2";
+const ollamaBaseUrl = process.env.OLLAMA_BASE_URL ?? "http://115.78.94.36:11434";
 
 async function request(method, path, body) {
   const response = await fetch(`${base}${path}`, {

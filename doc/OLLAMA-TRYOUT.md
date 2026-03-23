@@ -1,6 +1,6 @@
 # Ollama Tryout
 
-Paperclip now includes a minimal `ollama_local` adapter for local evaluation.
+Paperclip now includes a minimal `ollama_local` adapter for Ollama-backed evaluation.
 
 This adapter is intentionally lightweight:
 
@@ -15,17 +15,17 @@ It is not a replacement for the richer coding-agent adapters.
 ## Prerequisites
 
 - Paperclip running locally
-- Ollama running locally
-- at least one local model pulled, for example:
+- Ollama reachable at `http://115.78.94.36:11434`
+- the `nemotron-cascade-2` model available, for example:
 
 ```sh
-ollama pull qwen2.5-coder:7b
+ollama pull nemotron-cascade-2
 ```
 
 Verify Ollama is reachable:
 
 ```sh
-curl http://127.0.0.1:11434/api/tags
+curl http://115.78.94.36:11434/api/tags
 ```
 
 ## In The UI
@@ -35,8 +35,8 @@ Create an agent with adapter type `Ollama (local)`.
 Recommended values:
 
 - `Working directory`: absolute path to your repo or workspace
-- `Model`: a model returned by Ollama, for example `qwen2.5-coder:7b`
-- `Ollama base URL`: `http://127.0.0.1:11434`
+- `Model`: a model returned by Ollama, for example `nemotron-cascade-2`
+- `Ollama base URL`: `http://115.78.94.36:11434`
 - `Command`: leave blank to use `node`
 
 Optional:

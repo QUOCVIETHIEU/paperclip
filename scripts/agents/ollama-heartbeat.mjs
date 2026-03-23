@@ -8,7 +8,7 @@ const PAPERCLIP_API_KEY = requiredEnv("PAPERCLIP_API_KEY");
 const PAPERCLIP_RUN_ID = requiredEnv("PAPERCLIP_RUN_ID");
 const OLLAMA_MODEL = requiredEnv("OLLAMA_MODEL");
 
-const OLLAMA_BASE_URL = optionalEnv("OLLAMA_BASE_URL", "http://127.0.0.1:11434");
+const OLLAMA_BASE_URL = optionalEnv("OLLAMA_BASE_URL", "http://115.78.94.36:11434");
 const OLLAMA_KEEP_ALIVE = optionalEnv("OLLAMA_KEEP_ALIVE", "5m");
 const OLLAMA_OPTIONS_JSON = optionalEnv("OLLAMA_OPTIONS_JSON", "");
 const OLLAMA_SYSTEM_PROMPT = optionalEnv(
@@ -141,9 +141,10 @@ function buildPrompt(input) {
         "Direct reports available for delegation",
         JSON.stringify(input.directReports, null, 2),
         "",
-        "If this issue should be delegated, return your answer in two parts:",
-        "1. The human-facing markdown comment.",
-        "2. A machine-readable block introduced by the exact marker `DELEGATION_PLAN_JSON` followed by a single JSON code fence.",
+        "If this issue should be delegated, produce a normal human-facing markdown answer first.",
+        "After the human-facing markdown answer, append a machine-readable block introduced by the exact marker `DELEGATION_PLAN_JSON` followed by a single JSON code fence.",
+        "Do not mention these formatting instructions in the human-facing markdown answer.",
+        "Do not say things like 'we need to output two parts', 'human-facing markdown comment', or discuss the response protocol.",
         "",
         "The JSON schema is:",
         JSON.stringify({
@@ -152,6 +153,7 @@ function buildPrompt(input) {
             {
               title: "string",
               assigneeAgentId: "uuid from directReports list",
+              assigneeName: "exact direct report name from directReports list",
               objective: "string",
               scope: ["string"],
               outOfScope: ["string"],
@@ -163,9 +165,11 @@ function buildPrompt(input) {
         "",
         "Rules for delegation JSON:",
         "- Only include direct reports from the provided list.",
+        "- Prefer `assigneeName` using the exact direct report name. Use `assigneeAgentId` only if you are certain.",
         "- Create at most one task per direct report unless the issue explicitly requires otherwise.",
         "- Keep task titles concrete and role-appropriate.",
         "- If no delegation is needed, omit the marker and JSON block entirely.",
+        "- If you omit the JSON block, Paperclip may still try to infer delegation from markdown sections named like `### Issue cho BA AGENT`, but JSON is more reliable.",
       ].join("\n")
     : "";
 
@@ -262,7 +266,11 @@ function buildIssueComment(input) {
   const lines = [
     cleanedResponse,
   ];
-  if (input.delegationResult?.created?.length > 0 || input.delegationResult?.skipped?.length > 0) {
+  if (
+    input.delegationResult?.created?.length > 0 ||
+    input.delegationResult?.skipped?.length > 0 ||
+    input.delegationResult?.notes?.length > 0
+  ) {
     lines.push(
       "",
       "### Kết quả giao việc tự động",
@@ -271,7 +279,10 @@ function buildIssueComment(input) {
       lines.push(...input.delegationResult.created.map((task) => `- Đã tạo ${task.identifier ?? task.id}: ${task.title}`));
     }
     if (input.delegationResult.skipped.length > 0) {
-      lines.push(...input.delegationResult.skipped.map((task) => `- Bỏ qua task đã tồn tại: ${task.title}`));
+      lines.push(...input.delegationResult.skipped.map((task) => `- Bỏ qua: ${task.reason}${task.title ? ` (${task.title})` : ""}`));
+    }
+    if (input.delegationResult.notes.length > 0) {
+      lines.push(...input.delegationResult.notes.map((note) => `- Ghi chú: ${note}`));
     }
   }
   lines.push(
@@ -297,6 +308,20 @@ function normalizeAgentResponse(response) {
     text = text.replace(/^```[a-zA-Z0-9_-]*\n?/, "").replace(/\n?```$/, "").trim();
   }
 
+  text = text
+    .split(/\r?\n/)
+    .filter((line) => {
+      const normalized = line.trim().toLowerCase();
+      if (!normalized) return true;
+      if (normalized.includes("we need to output two parts")) return false;
+      if (normalized.includes("human-facing markdown")) return false;
+      if (normalized.includes("response protocol")) return false;
+      if (normalized.includes("machine-readable block")) return false;
+      return true;
+    })
+    .join("\n")
+    .trim();
+
   text = text.replace(/^##\s+Ollama trial update\s*/i, "").trim();
   text = text.replace(/^#\s+Ollama trial update\s*/i, "").trim();
 
@@ -307,9 +332,13 @@ function parseDelegationPlan(response) {
   const marker = "DELEGATION_PLAN_JSON";
   const markerIndex = response.indexOf(marker);
   if (markerIndex < 0) {
+    const inferredTasks = inferDelegationTasksFromMarkdown(response);
     return {
       comment: response.trim(),
-      tasks: [],
+      tasks: inferredTasks.tasks,
+      diagnostics: inferredTasks.tasks.length > 0
+        ? ["Không có DELEGATION_PLAN_JSON, đã fallback parse từ markdown."]
+        : ["Không có DELEGATION_PLAN_JSON nên không có delegation machine-readable."],
     };
   }
 
@@ -317,14 +346,32 @@ function parseDelegationPlan(response) {
   const remainder = response.slice(markerIndex + marker.length);
   const match = remainder.match(/```json\s*([\s\S]*?)```/i) ?? remainder.match(/```\s*([\s\S]*?)```/i);
   if (!match?.[1]) {
-    throw new Error("Delegation marker found but JSON block is missing");
+    console.warn("[ollama-heartbeat] Delegation marker found but JSON block is missing; skipping delegation.");
+    const inferredTasks = inferDelegationTasksFromMarkdown(comment);
+    return {
+      comment,
+      tasks: inferredTasks.tasks,
+      diagnostics: inferredTasks.tasks.length > 0
+        ? ["Marker delegation có mặt nhưng thiếu JSON block; đã fallback parse từ markdown."]
+        : ["Marker delegation có mặt nhưng thiếu JSON block."],
+    };
   }
 
   let parsed;
   try {
     parsed = JSON.parse(match[1]);
   } catch (error) {
-    throw new Error(`Delegation JSON is invalid: ${error instanceof Error ? error.message : String(error)}`);
+    console.warn(
+      `[ollama-heartbeat] Delegation JSON is invalid: ${error instanceof Error ? error.message : String(error)}; skipping delegation.`,
+    );
+    const inferredTasks = inferDelegationTasksFromMarkdown(comment);
+    return {
+      comment,
+      tasks: inferredTasks.tasks,
+      diagnostics: inferredTasks.tasks.length > 0
+        ? ["Delegation JSON không hợp lệ; đã fallback parse từ markdown."]
+        : ["Delegation JSON không hợp lệ."],
+    };
   }
 
   const tasks = Array.isArray(parsed?.tasks) ? parsed.tasks : [];
@@ -335,28 +382,35 @@ function parseDelegationPlan(response) {
       .map((task) => ({
         title: readNonEmptyString(task.title),
         assigneeAgentId: readNonEmptyString(task.assigneeAgentId),
+        assigneeName: readNonEmptyString(task.assigneeName),
         objective: readNonEmptyString(task.objective),
         scope: normalizeStringList(task.scope),
         outOfScope: normalizeStringList(task.outOfScope),
         deliverables: normalizeStringList(task.deliverables),
         completionCriteria: normalizeStringList(task.completionCriteria),
       }))
-      .filter((task) => task.title && task.assigneeAgentId && task.objective),
+      .filter((task) => task.title && (task.assigneeAgentId || task.assigneeName) && task.objective),
+    diagnostics: [],
   };
 }
 
 async function maybeCreateDelegatedIssues(input) {
   if (!Array.isArray(input.directReports) || input.directReports.length === 0) {
-    return { created: [], skipped: [] };
+    return { created: [], skipped: [], notes: ["Agent không có direct reports nên không thể auto-delegate."] };
   }
   if (!Array.isArray(input.plan.tasks) || input.plan.tasks.length === 0) {
-    return { created: [], skipped: [] };
+    return { created: [], skipped: [], notes: input.plan.diagnostics ?? [] };
   }
 
   const directReportsById = new Map(
     input.directReports
       .filter((report) => report && typeof report.id === "string")
       .map((report) => [report.id, report]),
+  );
+  const directReportsByName = new Map(
+    input.directReports
+      .filter((report) => report && typeof report.name === "string")
+      .map((report) => [normalizeComparableTitle(report.name), report]),
   );
   const existingChildren = await apiJson(
     `/api/companies/${input.companyId}/issues?parentId=${encodeURIComponent(input.parentIssue.id)}`,
@@ -371,12 +425,26 @@ async function maybeCreateDelegatedIssues(input) {
 
   const created = [];
   const skipped = [];
+  const notes = [...(input.plan.diagnostics ?? [])];
   for (const task of input.plan.tasks) {
-    if (!directReportsById.has(task.assigneeAgentId)) continue;
+    const assignee = resolveDelegationAssignee({
+      task,
+      directReportsById,
+      directReportsByName,
+    });
+    if (!assignee) {
+      skipped.push({
+        title: task.title,
+        reason: task.assigneeAgentId || task.assigneeName
+          ? "Không map được assignee sang direct report hợp lệ"
+          : "Task thiếu assignee hợp lệ",
+      });
+      continue;
+    }
     const normalizedTitle = normalizeComparableTitle(task.title);
     if (!normalizedTitle) continue;
     if (existingTitles.has(normalizedTitle)) {
-      skipped.push({ title: task.title });
+      skipped.push({ title: task.title, reason: "Task đã tồn tại dưới parent issue" });
       continue;
     }
 
@@ -391,7 +459,7 @@ async function maybeCreateDelegatedIssues(input) {
         description: buildDelegatedIssueDescription(task),
         status: "todo",
         priority: input.parentIssue.priority ?? "medium",
-        assigneeAgentId: task.assigneeAgentId,
+        assigneeAgentId: assignee.id,
         requestDepth: Number(input.parentIssue.requestDepth ?? 0) + 1,
       },
     });
@@ -399,7 +467,22 @@ async function maybeCreateDelegatedIssues(input) {
     existingTitles.add(normalizedTitle);
   }
 
-  return { created, skipped };
+  if (created.length === 0 && skipped.length === 0 && notes.length === 0) {
+    notes.push("Không phát hiện task delegation nào có thể tạo.");
+  }
+
+  return { created, skipped, notes };
+}
+
+function resolveDelegationAssignee(input) {
+  if (input.task.assigneeAgentId && input.directReportsById.has(input.task.assigneeAgentId)) {
+    return input.directReportsById.get(input.task.assigneeAgentId) ?? null;
+  }
+  const normalizedName = normalizeComparableTitle(input.task.assigneeName);
+  if (normalizedName && input.directReportsByName.has(normalizedName)) {
+    return input.directReportsByName.get(normalizedName) ?? null;
+  }
+  return null;
 }
 
 function buildDelegatedIssueDescription(task) {
@@ -432,6 +515,58 @@ function readNonEmptyString(value) {
 
 function normalizeComparableTitle(value) {
   return readNonEmptyString(value).toLocaleLowerCase();
+}
+
+function inferDelegationTasksFromMarkdown(response) {
+  const tasks = [];
+  const sections = response.match(/###\s*Issue cho[\s\S]*?(?=\n###\s*Issue cho|\s*$)/gi) ?? [];
+  for (const section of sections) {
+    const headingMatch = section.match(/###\s*Issue cho\s*:?\s*(.+?)\s*$/im);
+    const assigneeName = headingMatch?.[1]?.trim() ?? "";
+    const title = extractSingleLineField(section, "Task title");
+    const objective = extractSingleLineField(section, "Mục tiêu");
+    const scope = extractListField(section, "Phạm vi công việc");
+    const outOfScope = extractListField(section, "Ngoài phạm vi");
+    const deliverables = extractListField(section, "Output mong đợi");
+    const completionCriteria = extractListField(section, "Tiêu chí hoàn thành");
+    if (title && assigneeName && objective) {
+      tasks.push({
+        title,
+        assigneeAgentId: "",
+        assigneeName,
+        objective,
+        scope,
+        outOfScope,
+        deliverables,
+        completionCriteria,
+      });
+    }
+  }
+  return { tasks };
+}
+
+function extractSingleLineField(section, label) {
+  const match = section.match(new RegExp(`[-*]\\s*\\*\\*?${escapeRegExp(label)}\\*\\*?\\s*:?\\s*(.+)$`, "im"))
+    ?? section.match(new RegExp(`${escapeRegExp(label)}\\s*:?\\s*(.+)$`, "im"));
+  return match?.[1]?.trim() ?? "";
+}
+
+function extractListField(section, label) {
+  const blockMatch = section.match(
+    new RegExp(`${escapeRegExp(label)}\\*\\*?\\s*:?\\s*([\\s\\S]*?)(?=\\n[-*]\\s*\\*\\*?[A-ZÀ-ỹ]|\\n###|$)`, "im"),
+  ) ?? section.match(
+    new RegExp(`${escapeRegExp(label)}\\s*:?\\s*([\\s\\S]*?)(?=\\n[-*]\\s*[A-ZÀ-ỹ]|\\n###|$)`, "im"),
+  );
+
+  if (!blockMatch?.[1]) return [];
+  return blockMatch[1]
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^[-+*]\s*/, "").trim())
+    .filter(Boolean);
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function pickIssue(inbox) {

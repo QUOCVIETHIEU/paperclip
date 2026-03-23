@@ -1,5 +1,8 @@
 import type { CreateConfigValues } from "../../components/AgentConfigForm";
 
+const DEFAULT_OLLAMA_BASE_URL = "http://115.78.94.36:11434";
+const DEFAULT_OLLAMA_MODEL = "nemotron-cascade-2";
+
 function parseEnvVars(text: string): Record<string, { type: "plain"; value: string }> {
   const env: Record<string, { type: "plain"; value: string }> = {};
   for (const line of text.split(/\r?\n/)) {
@@ -20,12 +23,12 @@ export function buildOllamaLocalConfig(v: CreateConfigValues): Record<string, un
     timeoutSec: 0,
     graceSec: 15,
     command: v.command || "node",
+    model: v.model || DEFAULT_OLLAMA_MODEL,
+    baseUrl: v.url || DEFAULT_OLLAMA_BASE_URL,
   };
   if (v.cwd) config.cwd = v.cwd;
-  if (v.model) config.model = v.model;
   if (v.instructionsFilePath) config.instructionsFilePath = v.instructionsFilePath;
   if (v.promptTemplate) config.promptTemplate = v.promptTemplate;
-  if (v.url) config.baseUrl = v.url;
 
   const env = {
     ...parseEnvVars(v.envVars),

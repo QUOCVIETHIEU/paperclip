@@ -39,12 +39,12 @@ export function OllamaLocalConfigFields({
         </div>
       </Field>
 
-      <Field label="Ollama base URL" hint="Defaults to http://127.0.0.1:11434.">
+      <Field label="Ollama base URL" hint="Defaults to http://115.78.94.36:11434.">
         <DraftInput
           value={
             isCreate
               ? values!.url
-              : eff("adapterConfig", "baseUrl", String(config.baseUrl ?? "http://127.0.0.1:11434"))
+              : eff("adapterConfig", "baseUrl", String(config.baseUrl ?? "http://115.78.94.36:11434"))
           }
           onCommit={(v) =>
             isCreate
@@ -53,7 +53,7 @@ export function OllamaLocalConfigFields({
           }
           immediate
           className={inputClass}
-          placeholder="http://127.0.0.1:11434"
+          placeholder="http://115.78.94.36:11434"
         />
       </Field>
     </>

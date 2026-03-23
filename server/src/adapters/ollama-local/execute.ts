@@ -12,7 +12,7 @@ import {
   runChildProcess,
 } from "../utils.js";
 
-const DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
+const DEFAULT_OLLAMA_BASE_URL = "http://115.78.94.36:11434";
 
 function bridgeScriptPath() {
   const adapterDir = path.dirname(fileURLToPath(import.meta.url));

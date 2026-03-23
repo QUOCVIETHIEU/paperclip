@@ -150,6 +150,54 @@ export function issueRoutes(db: Db, storage: StorageService) {
     });
   }
 
+  function firstMeaningfulLine(value: string | null | undefined) {
+    if (!value) return null;
+    return (
+      value
+        .split("\n")
+        .map((line) => line.trim())
+        .find((line) => line.length > 0) ?? null
+    );
+  }
+
+  function summarizeCommentBody(value: string | null | undefined, maxLength = 280) {
+    const line = firstMeaningfulLine(value);
+    if (!line) return null;
+    if (line.length <= maxLength) return line;
+    return `${line.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+  }
+
+  async function addParentCompletionSummaryComment(
+    currentIssue: NonNullable<Awaited<ReturnType<typeof svc.getById>>>,
+    parentIssue: Awaited<ReturnType<typeof svc.getById>>,
+  ) {
+    if (!parentIssue) return;
+    if (currentIssue.status !== "done") return;
+
+    const orchestrationState = parseIssueOrchestrationState(currentIssue.orchestrationState);
+    if (orchestrationState.benchmarkSourceIssueId) return;
+
+    const [latestComment, assigneeAgent] = await Promise.all([
+      svc.listComments(currentIssue.id, { order: "desc", limit: 1 }).then((rows) => rows[0] ?? null),
+      currentIssue.assigneeAgentId ? agentsSvc.getById(currentIssue.assigneeAgentId) : Promise.resolve(null),
+    ]);
+
+    const assigneeName =
+      assigneeAgent?.name ??
+      (currentIssue.assigneeAgentId ? `Agent ${currentIssue.assigneeAgentId.slice(0, 8)}` : "Unassigned agent");
+    const summary = summarizeCommentBody(latestComment?.body);
+    const issueRef = currentIssue.identifier ?? currentIssue.id;
+
+    const lines = [
+      `Sub-issue completed: ${issueRef} - ${currentIssue.title}`,
+      `Agent: ${assigneeName}`,
+      summary ? `Summary: ${summary}` : "Summary: No output comment was posted on the sub-issue.",
+      `Open sub-issue: /issues/${issueRef}`,
+    ];
+
+    await svc.addComment(parentIssue.id, lines.join("\n"), {});
+  }
+
   async function applyIssueStatusOrchestration(
     previousIssue: Awaited<ReturnType<typeof svc.getById>>,
     currentIssue: NonNullable<Awaited<ReturnType<typeof svc.getById>>>,
@@ -157,6 +205,9 @@ export function issueRoutes(db: Db, storage: StorageService) {
     if (!previousIssue) return currentIssue;
 
     const parentIssue = currentIssue.parentId ? await svc.getById(currentIssue.parentId) : null;
+    if (previousIssue.status !== "done" && currentIssue.status === "done") {
+      await addParentCompletionSummaryComment(currentIssue, parentIssue);
+    }
     const plan = planIssueStatusOrchestration({
       previousStatus: previousIssue.status,
       currentIssue,

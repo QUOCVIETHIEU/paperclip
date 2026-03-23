@@ -1066,6 +1066,41 @@ export function issueService(db: Db) {
         actorRunId &&
         current.status === "in_progress" &&
         current.assigneeAgentId === actorAgentId &&
+        current.checkoutRunId == null
+      ) {
+        const adopted = await db
+          .update(issues)
+          .set({
+            checkoutRunId: actorRunId,
+            executionRunId: actorRunId,
+            executionLockedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(issues.id, id),
+              eq(issues.status, "in_progress"),
+              eq(issues.assigneeAgentId, actorAgentId),
+              isNull(issues.checkoutRunId),
+            ),
+          )
+          .returning({
+            id: issues.id,
+            status: issues.status,
+            assigneeAgentId: issues.assigneeAgentId,
+            checkoutRunId: issues.checkoutRunId,
+          })
+          .then((rows) => rows[0] ?? null);
+
+        if (adopted) {
+          return { ...adopted, adoptedFromRunId: null as string | null };
+        }
+      }
+
+      if (
+        actorRunId &&
+        current.status === "in_progress" &&
+        current.assigneeAgentId === actorAgentId &&
         current.checkoutRunId &&
         current.checkoutRunId !== actorRunId
       ) {

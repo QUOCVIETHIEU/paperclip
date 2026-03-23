@@ -20,8 +20,8 @@ Use when:
 
 Core fields:
 - cwd (string, optional): absolute working directory used by the bridge process
-- model (string, required): Ollama model name, for example qwen2.5-coder:7b
-- baseUrl (string, optional): Ollama API base URL; defaults to http://127.0.0.1:11434
+- model (string, required): Ollama model name, for example nemotron-cascade-2
+- baseUrl (string, optional): Ollama API base URL; defaults to http://115.78.94.36:11434
 - instructionsFilePath (string, optional): absolute or cwd-relative markdown file appended to the prompt
 - promptTemplate (string, optional): heartbeat guidance appended after issue context
 - keepAlive (string, optional): Ollama keep_alive value

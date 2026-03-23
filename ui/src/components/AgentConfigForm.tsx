@@ -110,6 +110,9 @@ function isOverlayDirty(o: Overlay): boolean {
 const inputClass =
   "w-full rounded-md border border-border px-2.5 py-1.5 bg-transparent outline-none text-sm font-mono placeholder:text-muted-foreground/40";
 
+const DEFAULT_OLLAMA_BASE_URL = "http://115.78.94.36:11434";
+const DEFAULT_OLLAMA_MODEL = "nemotron-cascade-2";
+
 function parseCommaArgs(value: string): string[] {
   return value
     .split(",")
@@ -555,7 +558,8 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                   } else if (t === "gemini_local") {
                     nextValues.model = DEFAULT_GEMINI_LOCAL_MODEL;
                   } else if (t === "ollama_local") {
-                    nextValues.model = "";
+                    nextValues.model = DEFAULT_OLLAMA_MODEL;
+                    nextValues.url = DEFAULT_OLLAMA_BASE_URL;
                   } else if (t === "cursor") {
                     nextValues.model = DEFAULT_CURSOR_LOCAL_MODEL;
                   } else if (t === "opencode_local") {
@@ -573,12 +577,13 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                         t === "codex_local"
                           ? DEFAULT_CODEX_LOCAL_MODEL
                           : t === "gemini_local"
-                            ? DEFAULT_GEMINI_LOCAL_MODEL
+                          ? DEFAULT_GEMINI_LOCAL_MODEL
                           : t === "ollama_local"
-                            ? ""
+                            ? DEFAULT_OLLAMA_MODEL
                           : t === "cursor"
                             ? DEFAULT_CURSOR_LOCAL_MODEL
                           : "",
+                      baseUrl: t === "ollama_local" ? DEFAULT_OLLAMA_BASE_URL : undefined,
                       effort: "",
                       modelReasoningEffort: "",
                       variant: "",

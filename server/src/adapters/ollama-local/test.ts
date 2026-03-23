@@ -11,7 +11,7 @@ import {
   parseObject,
 } from "../utils.js";
 
-const DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
+const DEFAULT_OLLAMA_BASE_URL = "http://115.78.94.36:11434";
 
 function summarizeStatus(checks: AdapterEnvironmentCheck[]): AdapterEnvironmentTestResult["status"] {
   if (checks.some((check) => check.level === "error")) return "fail";
@@ -59,7 +59,7 @@ export async function testEnvironment(
       code: "ollama_model_missing",
       level: "error",
       message: "Ollama adapter requires a model.",
-      hint: "Choose a local model or pull one with `ollama pull <model>`.",
+      hint: "Choose a configured model or pull one with `ollama pull <model>`.",
     });
   } else {
     checks.push({
@@ -93,7 +93,7 @@ export async function testEnvironment(
         level: "error",
         message: `Ollama API responded with ${response.status}.`,
         detail: baseUrl,
-        hint: "Start Ollama locally and confirm the base URL is correct.",
+        hint: "Ensure Ollama is reachable and confirm the base URL is correct.",
       });
     } else {
       const json = await response.json() as { models?: Array<{ name?: string }> };
@@ -110,7 +110,7 @@ export async function testEnvironment(
         checks.push({
           code: "ollama_model_unavailable",
           level: "warn",
-          message: `Configured model is not installed locally: ${model}`,
+          message: `Configured model is not available from Ollama: ${model}`,
           hint: "Run `ollama pull <model>` or choose an installed model.",
         });
       }
@@ -121,7 +121,7 @@ export async function testEnvironment(
       level: "error",
       message: error instanceof Error ? error.message : "Could not connect to Ollama API",
       detail: baseUrl,
-      hint: "Start Ollama and verify the configured base URL.",
+      hint: "Ensure Ollama is reachable and verify the configured base URL.",
     });
   }
 
