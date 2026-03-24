@@ -46,6 +46,7 @@ import { MarkdownBody } from "../components/MarkdownBody";
 type ProjectBaseTab = "overview" | "list" | "configuration" | "budget";
 type ProjectPluginTab = `plugin:${string}`;
 type ProjectTab = ProjectBaseTab | ProjectPluginTab;
+type ApprovalRow = { issueId: string; issueTitle: string; approval: Approval };
 
 function isProjectPluginTab(value: string | null): value is ProjectPluginTab {
   return typeof value === "string" && value.startsWith("plugin:");
@@ -83,6 +84,288 @@ function actorLabel(agentId: string | null, userId: string | null, agentNameById
   if (agentId) return agentNameById.get(agentId) ?? agentId.slice(0, 8);
   if (userId) return "Board";
   return "—";
+}
+
+function IssuePreviewDialog({
+  companyId,
+  issueId,
+  approvalRow,
+  open,
+  onOpenChange,
+  onApprove,
+  onReject,
+}: {
+  companyId: string;
+  issueId: string | null;
+  approvalRow: ApprovalRow | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onApprove?: (approvalId: string) => void;
+  onReject?: (approvalId: string) => void;
+}) {
+  const navigate = useNavigate();
+  const [showSourceContext, setShowSourceContext] = useState(false);
+
+  const { data: agents } = useQuery({
+    queryKey: queryKeys.agents.list(companyId),
+    queryFn: () => agentsApi.list(companyId),
+    enabled: !!companyId,
+  });
+
+  const agentNameById = useMemo(
+    () => new Map((agents ?? []).map((agent) => [agent.id, agent.name])),
+    [agents],
+  );
+
+  const { data: previewIssue, isLoading: isPreviewIssueLoading } = useQuery({
+    queryKey: issueId ? queryKeys.issues.detail(issueId) : ["issue-preview", "idle"],
+    queryFn: () => issuesApi.get(issueId!),
+    enabled: !!issueId && open,
+  });
+
+  const { data: previewParentIssue, isLoading: isPreviewParentIssueLoading } = useQuery({
+    queryKey: previewIssue?.parentId ? queryKeys.issues.detail(previewIssue.parentId) : ["issue-preview-parent", "idle"],
+    queryFn: () => issuesApi.get(previewIssue!.parentId!),
+    enabled: !!previewIssue?.parentId && open,
+  });
+
+  const { data: previewComments, isLoading: isPreviewCommentsLoading } = useQuery({
+    queryKey: issueId ? queryKeys.issues.comments(issueId) : ["issue-preview-comments", "idle"],
+    queryFn: () => issuesApi.listComments(issueId!),
+    enabled: !!issueId && open,
+  });
+
+  const latestMeaningfulComments = useMemo(() => {
+    return (previewComments ?? [])
+      .filter((comment) => comment.body.trim().length > 0)
+      .slice()
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(0, 3);
+  }, [previewComments]);
+
+  const previewApprovalRequesterLabel = useMemo(() => {
+    if (!approvalRow) return null;
+    if (approvalRow.approval.requestedByAgentId) {
+      return agentNameById.get(approvalRow.approval.requestedByAgentId) ?? "Agent";
+    }
+    if (approvalRow.approval.requestedByUserId) {
+      return "Board";
+    }
+    return null;
+  }, [agentNameById, approvalRow]);
+
+  const previewApprovalRecipientLabel = useMemo(() => {
+    if (!approvalRow) return null;
+    const requestedFor = approvalRow.approval.payload?.["requestedFor"];
+    return typeof requestedFor === "string" && requestedFor.trim().length > 0
+      ? requestedFor.trim()
+      : null;
+  }, [approvalRow]);
+
+  const actionable =
+    approvalRow &&
+    (approvalRow.approval.status === "pending" || approvalRow.approval.status === "revision_requested");
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) {
+          setShowSourceContext(false);
+        }
+        onOpenChange(nextOpen);
+      }}
+    >
+      <DialogContent className="!w-[min(67vw,72rem)] !max-w-[min(67vw,72rem)] sm:!max-w-[min(67vw,72rem)]">
+        <DialogHeader>
+          <DialogTitle>{previewIssue?.title ?? "Issue Preview"}</DialogTitle>
+          <DialogDescription>
+            {approvalRow
+              ? "Review kết quả của BA trước khi quyết định approval."
+              : "Xem nhanh kết quả đầu ra của stage đã hoàn tất."}
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="max-h-[70vh] space-y-5 overflow-y-auto pr-2">
+          <div className="grid gap-3 rounded-lg border border-border/70 bg-muted/20 p-4 md:grid-cols-5">
+            <div>
+              <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Issue</div>
+              <div className="mt-1 text-sm font-medium">{previewIssue?.identifier ?? "—"}</div>
+            </div>
+            <div>
+              <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">From</div>
+              <div className="mt-1 text-sm font-medium">
+                {previewApprovalRequesterLabel ??
+                  (previewIssue
+                    ? actorLabel(previewIssue.createdByAgentId, previewIssue.createdByUserId, agentNameById)
+                    : "—")}
+              </div>
+            </div>
+            <div>
+              <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">To</div>
+              <div className="mt-1 text-sm font-medium">
+                {previewApprovalRecipientLabel ??
+                  (previewIssue
+                    ? actorLabel(
+                      resolveIssueRecipientAgentId(previewIssue),
+                      resolveIssueRecipientUserId(previewIssue),
+                      agentNameById,
+                    )
+                    : "—")}
+              </div>
+            </div>
+            <div>
+              <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Status</div>
+              <div className="mt-1 text-sm font-medium">{previewIssue?.status ?? "—"}</div>
+            </div>
+            <div>
+              <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Updated</div>
+              <div className="mt-1 text-sm font-medium">
+                {previewIssue ? `${formatDate(previewIssue.updatedAt)} • ${timeAgo(previewIssue.updatedAt)}` : "—"}
+              </div>
+            </div>
+          </div>
+
+          <section className="space-y-2">
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-sm font-semibold">
+                {approvalRow ? "Kết quả BA gửi để PM review" : "Kết quả đầu ra của giai đoạn"}
+              </div>
+              {issueId ? (
+                <Button variant="outline" size="sm" onClick={() => navigate(`/issues/${issueId}`)}>
+                  Open Full Issue
+                </Button>
+              ) : null}
+            </div>
+            <div className="space-y-3">
+              {isPreviewCommentsLoading ? (
+                <div className="rounded-lg border border-border/70 bg-background p-4 text-sm text-muted-foreground">
+                  Đang tải comments...
+                </div>
+              ) : latestMeaningfulComments.length > 0 ? (
+                latestMeaningfulComments.map((comment) => (
+                  <div key={comment.id} className="rounded-lg border border-border/70 bg-background p-4">
+                    <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                      <span>
+                        {comment.authorAgentId
+                          ? (agentNameById.get(comment.authorAgentId) ?? "Agent")
+                          : comment.authorUserId
+                            ? "Board"
+                            : "Unknown"}
+                      </span>
+                      <span>{formatDate(comment.createdAt)}</span>
+                      <span>{timeAgo(comment.createdAt)}</span>
+                    </div>
+                    <MarkdownBody className="[&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+                      {comment.body}
+                    </MarkdownBody>
+                  </div>
+                ))
+              ) : previewIssue?.description?.trim() ? (
+                <div className="rounded-lg border border-border/70 bg-background p-4">
+                  <MarkdownBody className="[&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+                    {previewIssue.description}
+                  </MarkdownBody>
+                </div>
+              ) : (
+                <div className="rounded-lg border border-border/70 bg-background p-4 text-sm text-muted-foreground">
+                  Chưa có nội dung nào để preview.
+                </div>
+              )}
+            </div>
+          </section>
+
+          <Collapsible open={showSourceContext} onOpenChange={setShowSourceContext}>
+            <div className="rounded-lg border border-border/70 bg-muted/20">
+              <CollapsibleTrigger className="flex w-full items-center justify-between px-4 py-3 text-left">
+                <div>
+                  <div className="text-sm font-semibold">Yêu cầu gốc từ PM</div>
+                  <div className="text-xs text-muted-foreground">
+                    Mở rộng khi cần xem lại bối cảnh giao việc ban đầu.
+                  </div>
+                </div>
+                <ChevronDown
+                  className={cn(
+                    "h-4 w-4 text-muted-foreground transition-transform",
+                    showSourceContext && "rotate-180",
+                  )}
+                />
+              </CollapsibleTrigger>
+              <CollapsibleContent>
+                <div className="border-t border-border/70 bg-background p-4">
+                  {isPreviewParentIssueLoading ? (
+                    <p className="text-sm text-muted-foreground">Đang tải nội dung issue...</p>
+                  ) : previewParentIssue ? (
+                    <div className="space-y-3">
+                      <div>
+                        <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+                          Issue PM
+                        </div>
+                        <div className="mt-1 text-sm font-medium">
+                          {previewParentIssue.identifier ?? "—"} · {previewParentIssue.title}
+                        </div>
+                      </div>
+                      {previewParentIssue.description?.trim() ? (
+                        <MarkdownBody className="[&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+                          {previewParentIssue.description}
+                        </MarkdownBody>
+                      ) : (
+                        <p className="text-sm text-muted-foreground">Issue PM này chưa có phần mô tả.</p>
+                      )}
+                    </div>
+                  ) : isPreviewIssueLoading ? (
+                    <p className="text-sm text-muted-foreground">Đang tải nội dung issue...</p>
+                  ) : previewIssue?.description?.trim() ? (
+                    <MarkdownBody className="[&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+                      {previewIssue.description}
+                    </MarkdownBody>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">
+                      Chưa tìm thấy issue gốc của PM hoặc issue đó chưa có phần mô tả.
+                    </p>
+                  )}
+                </div>
+              </CollapsibleContent>
+            </div>
+          </Collapsible>
+        </div>
+        <DialogFooter className="border-t border-border/70 pt-4">
+          <div className="flex w-full items-center justify-between gap-3">
+            <div className="text-xs text-muted-foreground">
+              {approvalRow ? (
+                <>
+                  {approvalTypeLabel(approvalRow.approval.type)} · {approvalStatusLabel(approvalRow.approval.status)}
+                </>
+              ) : (
+                "Review issue content and output from this completed stage."
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              {actionable && approvalRow && onApprove && onReject ? (
+                <>
+                  <Button
+                    size="sm"
+                    className="h-8 bg-green-700 px-3 text-white hover:bg-green-600"
+                    onClick={() => onApprove(approvalRow.approval.id)}
+                  >
+                    Approve
+                  </Button>
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    className="h-8 px-3"
+                    onClick={() => onReject(approvalRow.approval.id)}
+                  >
+                    Reject
+                  </Button>
+                </>
+              ) : null}
+            </div>
+          </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
 }
 
 function inferStageAndGate(
@@ -225,11 +508,7 @@ function inferTimelineStageKey(
 ): TimelineStageDef["key"] | null {
   const role = assigneeName?.toUpperCase() ?? "";
   const titleText = issue.title.toLowerCase();
-  const detailText = `${issue.title}\n${issue.description ?? ""}`
-    .split(/\n+/)
-    .slice(0, 12)
-    .join(" ")
-    .toLowerCase();
+  const detailText = `${issue.title}\n${issue.description ?? ""}`.toLowerCase();
 
   if (role.includes("CTO")) return "intake";
   if (role.includes("BA")) return "requirement";
@@ -238,8 +517,20 @@ function inferTimelineStageKey(
   if (role.includes("SD")) return "handover";
   if (role.includes("FE") || role.includes("BE") || role.includes("INTEGRATION") || role.includes("DEVOPS")) return "development";
   if (role.includes("TECH LEAD")) {
-    if (/(build|develop|implementation|module|integration|deploy|security|fix)/.test(titleText)) return "development";
-    if (/(build|develop|implementation|module|integration|deploy|security|fix)/.test(detailText)) return "development";
+    if (
+      /(development|coding|implementation|code review|build ready|deploy|fix bug|bugfix|hotfix|release readiness|triển khai|phát triển|lập trình|sửa lỗi)/.test(
+        titleText,
+      )
+    ) {
+      return "development";
+    }
+    if (
+      /(technical solution|solutioning|kế hoạch kỹ thuật|technical planning|module breakdown|dependencies|technical risk|dev approach|kiến trúc|giải pháp kỹ thuật)/.test(
+        titleText,
+      )
+    ) {
+      return "solutioning";
+    }
     return "solutioning";
   }
   if (role.includes("PM")) {
@@ -322,6 +613,7 @@ function OverviewContent({
   onUpdate: (data: Record<string, unknown>) => void;
   imageUploadHandler?: (file: File) => Promise<string>;
 }) {
+  const [previewIssueId, setPreviewIssueId] = useState<string | null>(null);
   const { data: agents } = useQuery({
     queryKey: queryKeys.agents.list(companyId),
     queryFn: () => agentsApi.list(companyId),
@@ -494,16 +786,20 @@ function OverviewContent({
     });
 
     const currentIndex = buckets.reduce((acc, entry, index) => {
-      if (entry.pending) return index;
-      if (entry.waitingForOperatorApprovalRequest) return index;
-      if (entry.hasBlocked) return index;
-      if (entry.openStageIssues.length > 0) return index;
+      if (
+        entry.pending ||
+        entry.waitingForOperatorApprovalRequest ||
+        entry.hasBlocked ||
+        entry.openStageIssues.length > 0
+      ) {
+        return index;
+      }
       return acc;
     }, -1);
 
     const lastActivityIndex = buckets.reduce((acc, entry, index) => (entry.hasActivity ? index : acc), -1);
 
-    return buckets.map(({ stage, bucket, openStageIssues, latestIssue, latestAssignee, pending, waitingForOperatorApprovalRequest, hasBlocked }, index) => {
+    return buckets.map(({ stage, bucket, openStageIssues, latestIssue, latestAssignee, pending, waitingForOperatorApprovalRequest, hasBlocked, hasActivity }, index) => {
       let state: "completed" | "in_progress" | "pending_approval" | "operator_action" | "blocked" | "upcoming" = "upcoming";
       if (index === currentIndex && pending) {
         state = "pending_approval";
@@ -513,9 +809,9 @@ function OverviewContent({
         state = "blocked";
       } else if (index === currentIndex && (openStageIssues.length > 0 || bucket.issues.length > 0)) {
         state = "in_progress";
-      } else if (currentIndex >= 0 && index < currentIndex) {
+      } else if (currentIndex >= 0 && index < currentIndex && hasActivity) {
         state = "completed";
-      } else if (currentIndex === -1 && lastActivityIndex >= 0 && index <= lastActivityIndex) {
+      } else if (currentIndex === -1 && lastActivityIndex >= 0 && index <= lastActivityIndex && hasActivity) {
         state = "completed";
       }
 
@@ -689,10 +985,12 @@ function OverviewContent({
         <div className="mt-5 relative">
           <div className="absolute left-[116px] top-0 bottom-0 w-px -translate-x-1/2 bg-border/80" />
           {timelineStages.map((stage, index) => (
-            <div key={stage.key} className="relative grid grid-cols-[88px_24px_minmax(0,1fr)] gap-4 pb-6 last:pb-0">
-              <div className="text-right">
+            <div key={stage.key} className="relative grid grid-cols-[104px_24px_minmax(0,1fr)] gap-4 pb-6 last:pb-0">
+              <div className="min-w-0 text-right">
                 <div className="text-lg font-semibold leading-none text-foreground">{String(index + 1).padStart(2, "0")}</div>
-                <div className="mt-1 text-[11px] uppercase tracking-[0.14em] text-muted-foreground">{stage.owner}</div>
+                <div className="mt-1 break-words text-[11px] uppercase leading-4 tracking-[0.12em] text-muted-foreground">
+                  {stage.owner}
+                </div>
               </div>
 
               <div className="relative flex justify-center">
@@ -714,18 +1012,40 @@ function OverviewContent({
                   ) : null}
                   {stage.latestAssignee ? <p>- Actor: {stage.latestAssignee}</p> : null}
                 </div>
-                <p className="mt-2 text-[11px] text-muted-foreground">
-                  {stage.pendingApproval
-                    ? `Updated ${timeAgo(stage.pendingApproval.approval.updatedAt)}`
-                    : stage.latestIssue
-                      ? `Updated ${timeAgo(stage.latestIssue.updatedAt)}`
-                      : "Chua co activity"}
-                </p>
+                <div className="mt-2 flex flex-wrap items-center gap-3">
+                  <p className="text-[11px] text-muted-foreground">
+                    {stage.pendingApproval
+                      ? `Updated ${timeAgo(stage.pendingApproval.approval.updatedAt)}`
+                      : stage.latestIssue
+                        ? `Updated ${timeAgo(stage.latestIssue.updatedAt)}`
+                        : "Chưa có hoạt động nào"}
+                  </p>
+                  {stage.state === "completed" && stage.latestIssue ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 px-2.5 text-[11px]"
+                      onClick={() => setPreviewIssueId(stage.latestIssue!.id)}
+                    >
+                      Xem kết quả
+                    </Button>
+                  ) : null}
+                </div>
               </div>
             </div>
           ))}
         </div>
       </div>
+
+      <IssuePreviewDialog
+        companyId={companyId}
+        issueId={previewIssueId}
+        approvalRow={null}
+        open={Boolean(previewIssueId)}
+        onOpenChange={(open) => {
+          if (!open) setPreviewIssueId(null);
+        }}
+      />
     </div>
   );
 }
@@ -772,8 +1092,8 @@ function ColorPicker({
                   setOpen(false);
                 }}
                 className={`h-6 w-6 rounded-md cursor-pointer transition-[transform,box-shadow] duration-150 hover:scale-110 ${color === currentColor
-                    ? "ring-2 ring-foreground ring-offset-1 ring-offset-background"
-                    : "hover:ring-2 hover:ring-foreground/30"
+                  ? "ring-2 ring-foreground ring-offset-1 ring-offset-background"
+                  : "hover:ring-2 hover:ring-foreground/30"
                   }`}
                 style={{ backgroundColor: color }}
                 aria-label={`Select color ${color}`}
@@ -796,10 +1116,8 @@ function ProjectIssuesList({
   companyId: string;
 }) {
   const queryClient = useQueryClient();
-  const navigate = useNavigate();
   const [previewIssueId, setPreviewIssueId] = useState<string | null>(null);
   const [previewApprovalId, setPreviewApprovalId] = useState<string | null>(null);
-  const [showSourceContext, setShowSourceContext] = useState(false);
 
   const { data: agents } = useQuery({
     queryKey: queryKeys.agents.list(companyId),
@@ -828,24 +1146,6 @@ function ProjectIssuesList({
     enabled: !!companyId,
   });
 
-  const { data: previewIssue, isLoading: isPreviewIssueLoading } = useQuery({
-    queryKey: previewIssueId ? queryKeys.issues.detail(previewIssueId) : ["issue-preview", "idle"],
-    queryFn: () => issuesApi.get(previewIssueId!),
-    enabled: !!previewIssueId,
-  });
-
-  const { data: previewParentIssue, isLoading: isPreviewParentIssueLoading } = useQuery({
-    queryKey: previewIssue?.parentId ? queryKeys.issues.detail(previewIssue.parentId) : ["issue-preview-parent", "idle"],
-    queryFn: () => issuesApi.get(previewIssue!.parentId!),
-    enabled: !!previewIssue?.parentId,
-  });
-
-  const { data: previewComments, isLoading: isPreviewCommentsLoading } = useQuery({
-    queryKey: previewIssueId ? queryKeys.issues.comments(previewIssueId) : ["issue-preview-comments", "idle"],
-    queryFn: () => issuesApi.listComments(previewIssueId!),
-    enabled: !!previewIssueId,
-  });
-
   const issueApprovalQueries = useQueries({
     queries: (issues ?? []).map((issue) => ({
       queryKey: queryKeys.issues.approvals(issue.id),
@@ -855,7 +1155,7 @@ function ProjectIssuesList({
   });
 
   const projectApprovals = useMemo(() => {
-    const rows: Array<{ issueId: string; issueTitle: string; approval: Approval }> = [];
+    const rows: ApprovalRow[] = [];
     for (let index = 0; index < (issues ?? []).length; index += 1) {
       const issue = issues?.[index];
       if (!issue) continue;
@@ -900,14 +1200,6 @@ function ProjectIssuesList({
     return projectApprovals.find((row) => row.approval.id === previewApprovalId) ?? null;
   }, [previewApprovalId, projectApprovals]);
 
-  const latestMeaningfulComments = useMemo(() => {
-    return (previewComments ?? [])
-      .filter((comment) => comment.body.trim().length > 0)
-      .slice()
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-      .slice(0, 3);
-  }, [previewComments]);
-
   const updateIssue = useMutation({
     mutationFn: ({ id, data }: { id: string; data: Record<string, unknown> }) =>
       issuesApi.update(id, data),
@@ -945,292 +1237,112 @@ function ProjectIssuesList({
     <div className="space-y-3">
       {projectApprovals.length > 0 ? (
         <>
-        <div className="rounded-xl border border-border/70 bg-card">
-          <div className="flex items-center justify-between border-b border-border px-4 py-3">
-            <div>
-              <h3 className="text-sm font-semibold">Project Approvals</h3>
-              <p className="text-xs text-muted-foreground">
-                Theo dõi approvals liên kết với các issue của dự án.
-              </p>
+          <div className="rounded-xl border border-border/70 bg-card">
+            <div className="flex items-center justify-between border-b border-border px-4 py-3">
+              <div>
+                <h3 className="text-sm font-semibold">Project Approvals</h3>
+                <p className="text-xs text-muted-foreground">
+                  Theo dõi approvals liên kết với các issue của dự án.
+                </p>
+              </div>
+              <span className="text-xs text-muted-foreground">
+                {projectApprovals.length} approval{projectApprovals.length === 1 ? "" : "s"}
+              </span>
             </div>
-            <span className="text-xs text-muted-foreground">
-              {projectApprovals.length} approval{projectApprovals.length === 1 ? "" : "s"}
-            </span>
-          </div>
 
-          <div className="divide-y divide-border">
-            {projectApprovals.map(({ issueId, issueTitle, approval }) => {
-              const requesterName = approval.requestedByAgentId
-                ? (agentNameById.get(approval.requestedByAgentId) ?? "Agent")
-                : "Board";
-              const actionable = approval.status === "pending" || approval.status === "revision_requested";
+            <div className="divide-y divide-border">
+              {projectApprovals.map(({ issueId, issueTitle, approval }) => {
+                const requesterName = approval.requestedByAgentId
+                  ? (agentNameById.get(approval.requestedByAgentId) ?? "Agent")
+                  : "Board";
+                const actionable = approval.status === "pending" || approval.status === "revision_requested";
 
-              return (
-                <div key={approval.id} className="flex flex-col gap-3 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
-                  <div className="min-w-0 space-y-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-sm font-medium">{approvalTypeLabel(approval.type)}</span>
-                      <span className={cn("inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold capitalize", approvalStatusBadgeClass(approval.status))}>
-                        {approvalStatusLabel(approval.status)}
-                      </span>
+                return (
+                  <div key={approval.id} className="flex flex-col gap-3 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+                    <div className="min-w-0 space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-sm font-medium">{approvalTypeLabel(approval.type)}</span>
+                        <span className={cn("inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold capitalize", approvalStatusBadgeClass(approval.status))}>
+                          {approvalStatusLabel(approval.status)}
+                        </span>
+                      </div>
+                      <p className="text-sm text-muted-foreground">
+                        Issue: <span className="text-foreground">{issueTitle}</span>
+                      </p>
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                        <span>requested by {requesterName}</span>
+                        <span>updated {timeAgo(approval.updatedAt)}</span>
+                        <span className="font-mono">{approval.id.slice(0, 8)}</span>
+                      </div>
                     </div>
-                    <p className="text-sm text-muted-foreground">
-                      Issue: <span className="text-foreground">{issueTitle}</span>
-                    </p>
-                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                      <span>requested by {requesterName}</span>
-                      <span>updated {timeAgo(approval.updatedAt)}</span>
-                      <span className="font-mono">{approval.id.slice(0, 8)}</span>
-                    </div>
-                  </div>
 
-                  <div className="flex items-center gap-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="h-8 px-3"
-                      onClick={() => {
-                        setPreviewIssueId(issueId);
-                        setPreviewApprovalId(approval.id);
-                      }}
-                    >
-                      View Issue
-                    </Button>
-                    {actionable ? (
-                      <>
+                    <div className="flex items-center gap-2">
                       <Button
-                        size="sm"
-                        className="h-8 bg-green-700 px-3 text-white hover:bg-green-600"
-                        onClick={() => approveApproval.mutate(approval.id)}
-                        disabled={approveApproval.isPending || rejectApproval.isPending}
-                      >
-                        Approve
-                      </Button>
-                      <Button
-                        variant="destructive"
+                        variant="outline"
                         size="sm"
                         className="h-8 px-3"
-                        onClick={() => rejectApproval.mutate(approval.id)}
-                        disabled={approveApproval.isPending || rejectApproval.isPending}
+                        onClick={() => {
+                          setPreviewIssueId(issueId);
+                          setPreviewApprovalId(approval.id);
+                        }}
                       >
-                        Reject
+                        View Issue
                       </Button>
-                      </>
-                    ) : null}
+                      {actionable ? (
+                        <>
+                          <Button
+                            size="sm"
+                            className="h-8 bg-green-700 px-3 text-white hover:bg-green-600"
+                            onClick={() => approveApproval.mutate(approval.id)}
+                            disabled={approveApproval.isPending || rejectApproval.isPending}
+                          >
+                            Approve
+                          </Button>
+                          <Button
+                            variant="destructive"
+                            size="sm"
+                            className="h-8 px-3"
+                            onClick={() => rejectApproval.mutate(approval.id)}
+                            disabled={approveApproval.isPending || rejectApproval.isPending}
+                          >
+                            Reject
+                          </Button>
+                        </>
+                      ) : null}
+                    </div>
                   </div>
-                </div>
-              );
-            })}
+                );
+              })}
+            </div>
           </div>
-        </div>
-        <Dialog
-          open={Boolean(previewIssueId)}
-          onOpenChange={(open) => {
-            if (!open) {
-              setPreviewIssueId(null);
-              setPreviewApprovalId(null);
-              setShowSourceContext(false);
+          <IssuePreviewDialog
+            companyId={companyId}
+            issueId={previewIssueId}
+            approvalRow={previewApprovalRow}
+            open={Boolean(previewIssueId)}
+            onOpenChange={(open) => {
+              if (!open) {
+                setPreviewIssueId(null);
+                setPreviewApprovalId(null);
+              }
+            }}
+            onApprove={(approvalId) =>
+              approveApproval.mutate(approvalId, {
+                onSuccess: () => {
+                  setPreviewIssueId(null);
+                  setPreviewApprovalId(null);
+                },
+              })
             }
-          }}
-        >
-          <DialogContent className="!w-[min(67vw,72rem)] !max-w-[min(67vw,72rem)] sm:!max-w-[min(67vw,72rem)]">
-            <DialogHeader>
-              <DialogTitle>{previewIssue?.title ?? "Issue Preview"}</DialogTitle>
-              <DialogDescription>
-                Xem nhanh nội dung issue để quyết định approval mà không rời khỏi trang dự án.
-              </DialogDescription>
-            </DialogHeader>
-
-            <div className="max-h-[70vh] space-y-5 overflow-y-auto pr-2">
-              <div className="grid gap-3 rounded-lg border border-border/70 bg-muted/20 p-4 md:grid-cols-5">
-                <div>
-                  <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Issue</div>
-                  <div className="mt-1 text-sm font-medium">{previewIssue?.identifier ?? "—"}</div>
-                </div>
-                <div>
-                  <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">From</div>
-                  <div className="mt-1 text-sm font-medium">
-                    {previewIssue
-                      ? actorLabel(previewIssue.createdByAgentId, previewIssue.createdByUserId, agentNameById)
-                      : "—"}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">To</div>
-                  <div className="mt-1 text-sm font-medium">
-                    {previewIssue
-                      ? actorLabel(
-                          resolveIssueRecipientAgentId(previewIssue),
-                          resolveIssueRecipientUserId(previewIssue),
-                          agentNameById,
-                        )
-                      : "—"}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Status</div>
-                  <div className="mt-1 text-sm font-medium">{previewIssue?.status ?? "—"}</div>
-                </div>
-                <div>
-                  <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Updated</div>
-                  <div className="mt-1 text-sm font-medium">
-                    {previewIssue ? `${formatDate(previewIssue.updatedAt)} • ${timeAgo(previewIssue.updatedAt)}` : "—"}
-                  </div>
-                </div>
-              </div>
-
-              <section className="space-y-2">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="text-sm font-semibold">Kết quả BA gửi để PM review</div>
-                  {previewIssueId ? (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => navigate(`/issues/${previewIssueId}`)}
-                    >
-                      Open Full Issue
-                    </Button>
-                  ) : null}
-                </div>
-                <div className="space-y-3">
-                  {isPreviewCommentsLoading ? (
-                    <div className="rounded-lg border border-border/70 bg-background p-4 text-sm text-muted-foreground">
-                      Đang tải comments...
-                    </div>
-                  ) : latestMeaningfulComments.length > 0 ? (
-                    latestMeaningfulComments.map((comment) => (
-                      <div key={comment.id} className="rounded-lg border border-border/70 bg-background p-4">
-                        <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                          <span>
-                            {comment.authorAgentId
-                              ? (agentNameById.get(comment.authorAgentId) ?? "Agent")
-                              : comment.authorUserId
-                                ? "Board"
-                                : "Unknown"}
-                          </span>
-                          <span>{formatDate(comment.createdAt)}</span>
-                          <span>{timeAgo(comment.createdAt)}</span>
-                        </div>
-                        <MarkdownBody className="[&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
-                          {comment.body}
-                        </MarkdownBody>
-                      </div>
-                    ))
-                  ) : (
-                    <div className="rounded-lg border border-border/70 bg-background p-4 text-sm text-muted-foreground">
-                      Chưa có comment nào để preview.
-                    </div>
-                  )}
-                </div>
-              </section>
-              <Collapsible open={showSourceContext} onOpenChange={setShowSourceContext}>
-                <div className="rounded-lg border border-border/70 bg-muted/20">
-                  <CollapsibleTrigger className="flex w-full items-center justify-between px-4 py-3 text-left">
-                    <div>
-                      <div className="text-sm font-semibold">Yêu cầu gốc từ PM</div>
-                      <div className="text-xs text-muted-foreground">
-                        Mở rộng khi cần xem lại bối cảnh giao việc ban đầu.
-                      </div>
-                    </div>
-                    <ChevronDown
-                      className={cn(
-                        "h-4 w-4 text-muted-foreground transition-transform",
-                        showSourceContext && "rotate-180",
-                      )}
-                    />
-                  </CollapsibleTrigger>
-                  <CollapsibleContent>
-                    <div className="border-t border-border/70 bg-background p-4">
-                      {isPreviewParentIssueLoading ? (
-                        <p className="text-sm text-muted-foreground">Đang tải nội dung issue...</p>
-                      ) : previewParentIssue ? (
-                        <div className="space-y-3">
-                          <div>
-                            <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-                              Issue PM
-                            </div>
-                            <div className="mt-1 text-sm font-medium">
-                              {previewParentIssue.identifier ?? "—"} · {previewParentIssue.title}
-                            </div>
-                          </div>
-                          {previewParentIssue.description?.trim() ? (
-                            <MarkdownBody className="[&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
-                              {previewParentIssue.description}
-                            </MarkdownBody>
-                          ) : (
-                            <p className="text-sm text-muted-foreground">Issue PM này chưa có phần mô tả.</p>
-                          )}
-                        </div>
-                      ) : isPreviewIssueLoading ? (
-                        <p className="text-sm text-muted-foreground">Đang tải nội dung issue...</p>
-                      ) : previewIssue?.description?.trim() ? (
-                        <MarkdownBody className="[&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
-                          {previewIssue.description}
-                        </MarkdownBody>
-                      ) : (
-                        <p className="text-sm text-muted-foreground">
-                          Chưa tìm thấy issue gốc của PM hoặc issue đó chưa có phần mô tả.
-                        </p>
-                      )}
-                    </div>
-                  </CollapsibleContent>
-                </div>
-              </Collapsible>
-            </div>
-            <DialogFooter className="border-t border-border/70 pt-4">
-              <div className="flex w-full items-center justify-between gap-3">
-                <div className="text-xs text-muted-foreground">
-                  {previewApprovalRow ? (
-                    <>
-                      {approvalTypeLabel(previewApprovalRow.approval.type)} · {approvalStatusLabel(previewApprovalRow.approval.status)}
-                    </>
-                  ) : (
-                    "Review issue content before taking approval action."
-                  )}
-                </div>
-                <div className="flex items-center gap-2">
-                  {previewApprovalRow &&
-                  (previewApprovalRow.approval.status === "pending" ||
-                    previewApprovalRow.approval.status === "revision_requested") ? (
-                    <>
-                      <Button
-                        size="sm"
-                        className="h-8 bg-green-700 px-3 text-white hover:bg-green-600"
-                        onClick={() =>
-                          approveApproval.mutate(previewApprovalRow.approval.id, {
-                            onSuccess: () => {
-                              setPreviewIssueId(null);
-                              setPreviewApprovalId(null);
-                            },
-                          })
-                        }
-                        disabled={approveApproval.isPending || rejectApproval.isPending}
-                      >
-                        Approve
-                      </Button>
-                      <Button
-                        variant="destructive"
-                        size="sm"
-                        className="h-8 px-3"
-                        onClick={() =>
-                          rejectApproval.mutate(previewApprovalRow.approval.id, {
-                            onSuccess: () => {
-                              setPreviewIssueId(null);
-                              setPreviewApprovalId(null);
-                            },
-                          })
-                        }
-                        disabled={approveApproval.isPending || rejectApproval.isPending}
-                      >
-                        Reject
-                      </Button>
-                    </>
-                  ) : null}
-                </div>
-              </div>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
+            onReject={(approvalId) =>
+              rejectApproval.mutate(approvalId, {
+                onSuccess: () => {
+                  setPreviewIssueId(null);
+                  setPreviewApprovalId(null);
+                },
+              })
+            }
+          />
         </>
       ) : null}
 
