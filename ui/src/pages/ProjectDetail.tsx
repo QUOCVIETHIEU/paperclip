@@ -122,6 +122,13 @@ function approvalTypeLabel(type: string) {
   return type.replace(/_/g, " ");
 }
 
+function gateApproverLabel(stageKey: TimelineStageDef["key"]) {
+  if (stageKey === "requirement") return "PM";
+  if (stageKey === "design") return "PM + TECH LEAD";
+  if (stageKey === "qa") return "TECH LEAD + PM";
+  return "Reviewer";
+}
+
 function activeGateLabelForIssue(
   issueId: string | null,
   pendingApprovals: Array<{ issueId: string; approval: { type: string } }>,
@@ -212,34 +219,38 @@ function inferTimelineStageKey(
   return issue.status === "done" ? "handover" : null;
 }
 
-function timelineStateBadgeClass(state: "completed" | "in_progress" | "pending_approval" | "blocked" | "upcoming") {
+function timelineStateBadgeClass(state: "completed" | "in_progress" | "pending_approval" | "operator_action" | "blocked" | "upcoming") {
   if (state === "completed") return "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
   if (state === "in_progress") return "border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300";
   if (state === "pending_approval") return "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300";
+  if (state === "operator_action") return "border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-700 dark:text-fuchsia-300";
   if (state === "blocked") return "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300";
   return "border-border bg-muted text-muted-foreground";
 }
 
-function timelineNodeClass(state: "completed" | "in_progress" | "pending_approval" | "blocked" | "upcoming") {
+function timelineNodeClass(state: "completed" | "in_progress" | "pending_approval" | "operator_action" | "blocked" | "upcoming") {
   if (state === "completed") return "border-emerald-500/40 bg-emerald-500/20 text-emerald-300";
   if (state === "in_progress") return "border-sky-500/40 bg-sky-500/20 text-sky-300";
   if (state === "pending_approval") return "border-amber-500/40 bg-amber-500/20 text-amber-300";
+  if (state === "operator_action") return "border-fuchsia-500/40 bg-fuchsia-500/20 text-fuchsia-300";
   if (state === "blocked") return "border-red-500/40 bg-red-500/20 text-red-300";
   return "border-border bg-muted text-muted-foreground";
 }
 
-function timelineDotClass(state: "completed" | "in_progress" | "pending_approval" | "blocked" | "upcoming") {
+function timelineDotClass(state: "completed" | "in_progress" | "pending_approval" | "operator_action" | "blocked" | "upcoming") {
   if (state === "completed") return "border-emerald-400";
   if (state === "in_progress") return "border-sky-400";
   if (state === "pending_approval") return "border-amber-400";
+  if (state === "operator_action") return "border-fuchsia-400";
   if (state === "blocked") return "border-red-400";
   return "border-muted-foreground/40";
 }
 
-function timelineCardClass(state: "completed" | "in_progress" | "pending_approval" | "blocked" | "upcoming") {
+function timelineCardClass(state: "completed" | "in_progress" | "pending_approval" | "operator_action" | "blocked" | "upcoming") {
   if (state === "completed") return "border-emerald-500/20 bg-emerald-500/5";
   if (state === "in_progress") return "border-sky-500/20 bg-sky-500/5";
   if (state === "pending_approval") return "border-amber-500/20 bg-amber-500/5";
+  if (state === "operator_action") return "border-fuchsia-500/20 bg-fuchsia-500/5";
   if (state === "blocked") return "border-red-500/20 bg-red-500/5";
   return "border-border/70 bg-card";
 }
@@ -255,10 +266,11 @@ function timelineStageAccent(stageKey: TimelineStageDef["key"]) {
   return "from-amber-800 to-stone-900 border-amber-600/30";
 }
 
-function timelineStateLabel(state: "completed" | "in_progress" | "pending_approval" | "blocked" | "upcoming") {
+function timelineStateLabel(state: "completed" | "in_progress" | "pending_approval" | "operator_action" | "blocked" | "upcoming") {
   if (state === "completed") return "Completed";
   if (state === "in_progress") return "In Progress";
   if (state === "pending_approval") return "Pending";
+  if (state === "operator_action") return "Operator Action";
   if (state === "blocked") return "Blocked / On Hold";
   return "Upcoming";
 }
@@ -438,9 +450,23 @@ function OverviewContent({
         : null;
       const pending = bucket.pendingApprovals[0] ?? null;
 
-      let state: "completed" | "in_progress" | "pending_approval" | "blocked" | "upcoming" = "upcoming";
+      const waitingForOperatorApprovalRequest =
+        Boolean(stage.gate) &&
+        !pending &&
+        openStageIssues.length > 0 &&
+        openStageIssues.every(
+          (issue) =>
+            issue.status === "todo" &&
+            !issue.assigneeAgentId &&
+            !issue.assigneeUserId &&
+            Boolean(issue.lastAssignedAgentId ?? issue.lastAssignedUserId),
+        );
+
+      let state: "completed" | "in_progress" | "pending_approval" | "operator_action" | "blocked" | "upcoming" = "upcoming";
       if (pending) {
         state = "pending_approval";
+      } else if (waitingForOperatorApprovalRequest) {
+        state = "operator_action";
       } else if (bucket.issues.some((issue) => issue.status === "blocked")) {
         state = "blocked";
       } else if (index < focusIndex && focusIndex >= 0) {
@@ -454,6 +480,8 @@ function OverviewContent({
       let detail = "Chưa bắt đầu.";
       if (state === "pending_approval" && pending) {
         detail = `Đang chờ ${approvalTypeLabel(pending.approval.type)} cho issue "${pending.issueTitle}".`;
+      } else if (state === "operator_action" && latestIssue) {
+        detail = `Waiting operator to send ${stage.gate} to ${gateApproverLabel(stage.key)} for issue "${latestIssue.title}".`;
       } else if (state === "blocked") {
         const blockedIssue = bucket.issues.find((issue) => issue.status === "blocked");
         detail = blockedIssue ? `Đang bị blocked ở issue "${blockedIssue.title}".` : "Có issue blocked trong giai đoạn này.";
@@ -471,12 +499,28 @@ function OverviewContent({
         latestIssue,
         latestAssignee,
         pendingApproval: pending,
+        waitingForOperatorApprovalRequest,
         detail,
       };
     });
   }, [agentNameById, pendingApprovals, projectIssues]);
 
-  const currentTimelineStage = timelineStages.find((stage) => stage.state === "pending_approval" || stage.state === "blocked" || stage.state === "in_progress") ?? null;
+  const currentTimelineStage =
+    timelineStages.find(
+      (stage) =>
+        stage.state === "pending_approval" ||
+        stage.state === "operator_action" ||
+        stage.state === "blocked" ||
+        stage.state === "in_progress",
+    ) ?? null;
+  const completedStages = timelineStages.filter((stage) => stage.state === "completed").length;
+  const progressPercent = Math.max(
+    0,
+    Math.min(
+      100,
+      Math.round(((completedStages + (currentTimelineStage ? 0.5 : 0)) / Math.max(timelineStages.length, 1)) * 100),
+    ),
+  );
 
   return (
     <div className="space-y-6">
@@ -525,23 +569,37 @@ function OverviewContent({
         </div>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
-        <div>
-          <span className="text-muted-foreground">Status</span>
-          <div className="mt-1">
-            <StatusBadge status={project.status} />
-          </div>
-        </div>
-        <div>
-          <span className="text-muted-foreground">Last Updated</span>
-          <p>{timeAgo(project.updatedAt ?? new Date().toISOString())}</p>
-        </div>
-        {project.targetDate && (
+      <div className="rounded-xl border border-border/70 bg-card p-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div>
-            <span className="text-muted-foreground">Target Date</span>
-            <p>{formatDate(project.targetDate)}</p>
+            <p className="text-sm font-medium">Project Progress</p>
+            <p className="text-sm text-muted-foreground">
+              {completedStages}/{timelineStages.length} stages completed
+              {currentTimelineStage ? `, current stage: ${currentTimelineStage.title.replace(/^\d+\.\s*/, "")}` : ""}
+            </p>
+            {currentTimelineStage?.state === "operator_action" ? (
+              <p className="mt-1 text-sm text-fuchsia-600 dark:text-fuchsia-300">
+                Waiting operator to send {currentTimelineStage.gate} to {gateApproverLabel(currentTimelineStage.key)}.
+              </p>
+            ) : currentTimelineStage?.state === "pending_approval" ? (
+              <p className="mt-1 text-sm text-amber-600 dark:text-amber-300">
+                Waiting approval before the project can move to the next stage.
+              </p>
+            ) : null}
           </div>
-        )}
+          <div className="text-right">
+            <p className="text-2xl font-semibold tabular-nums">{progressPercent}%</p>
+            {project.targetDate ? (
+              <p className="text-xs text-muted-foreground">Target: {formatDate(project.targetDate)}</p>
+            ) : null}
+          </div>
+        </div>
+        <div className="mt-3 h-3 w-full overflow-hidden rounded-full bg-muted">
+          <div
+            className="h-full rounded-full bg-gradient-to-r from-sky-500 via-cyan-500 to-emerald-500 transition-[width] duration-300"
+            style={{ width: `${progressPercent}%` }}
+          />
+        </div>
       </div>
 
       <div className="rounded-2xl border border-border/70 bg-card/80 p-4">
@@ -575,6 +633,7 @@ function OverviewContent({
             { state: "completed" as const, label: "Completed" },
             { state: "in_progress" as const, label: "In Progress" },
             { state: "pending_approval" as const, label: "Pending" },
+            { state: "operator_action" as const, label: "Operator Action" },
             { state: "blocked" as const, label: "Blocked" },
             { state: "upcoming" as const, label: "Upcoming" },
           ].map((item) => (

@@ -53,7 +53,7 @@ import {
   SlidersHorizontal,
   Trash2,
 } from "lucide-react";
-import type { ActivityEvent } from "@paperclipai/shared";
+import type { ActivityEvent, Approval } from "@paperclipai/shared";
 import type { Agent, IssueAttachment } from "@paperclipai/shared";
 
 type CommentReassignment = {
@@ -131,6 +131,20 @@ function gateBadgeClass(gate: string) {
   if (gate === "UX/UI Approval") return "border-pink-500/30 bg-pink-500/10 text-pink-700 dark:text-pink-300";
   if (gate === "QA Exit Approval") return "border-orange-500/30 bg-orange-500/10 text-orange-700 dark:text-orange-300";
   return "border-border bg-muted text-muted-foreground";
+}
+
+function latestApprovalOfType(
+  approvals: Approval[] | undefined,
+  type: Approval["type"],
+) {
+  return (
+    [...(approvals ?? [])]
+      .filter((approval) => approval.type === type)
+      .sort(
+        (a, b) =>
+          new Date(b.updatedAt ?? b.createdAt).getTime() - new Date(a.updatedAt ?? a.createdAt).getTime(),
+      )[0] ?? null
+  );
 }
 
 function humanizeValue(value: unknown): string {
@@ -413,17 +427,17 @@ export function IssueDetail() {
   }, [allIssues, issue]);
 
   const linkedRequirementApproval = useMemo(
-    () => (linkedApprovals ?? []).find((approval) => approval.type === "approve_requirement_package") ?? null,
+    () => latestApprovalOfType(linkedApprovals, "approve_requirement_package"),
     [linkedApprovals],
   );
 
   const linkedDesignApproval = useMemo(
-    () => (linkedApprovals ?? []).find((approval) => approval.type === "approve_design_package") ?? null,
+    () => latestApprovalOfType(linkedApprovals, "approve_design_package"),
     [linkedApprovals],
   );
 
   const linkedQaExitApproval = useMemo(
-    () => (linkedApprovals ?? []).find((approval) => approval.type === "approve_qa_exit") ?? null,
+    () => latestApprovalOfType(linkedApprovals, "approve_qa_exit"),
     [linkedApprovals],
   );
 
@@ -587,7 +601,11 @@ export function IssueDetail() {
       if (!issue || !resolvedCompanyId) throw new Error("Issue not loaded");
       const approval = await approvalsApi.create(resolvedCompanyId, {
         type,
-        requestedByAgentId: issue.createdByAgentId ?? issue.assigneeAgentId ?? null,
+        requestedByAgentId:
+          issue.createdByAgentId ??
+          issue.assigneeAgentId ??
+          issue.lastAssignedAgentId ??
+          null,
         issueIds: [issue.id],
         payload: {
           issueId: issue.id,
@@ -597,6 +615,7 @@ export function IssueDetail() {
           requestedFor:
             agentMap.get(issue.createdByAgentId ?? "")?.name ??
             agentMap.get(issue.assigneeAgentId ?? "")?.name ??
+            agentMap.get(issue.lastAssignedAgentId ?? "")?.name ??
             "Approval",
           summary,
         },
@@ -756,6 +775,66 @@ export function IssueDetail() {
     .concat(assigneeLabel)
     .join(" -> ");
   const stageAndGate = inferStageAndGate(issue, assigneeLabel);
+  const workflowApprovalAction = (() => {
+    const requesterAgentName =
+      (issue.createdByAgentId && agentMap.get(issue.createdByAgentId)?.name) ||
+      (issue.lastAssignedAgentId && agentMap.get(issue.lastAssignedAgentId)?.name) ||
+      (issue.assigneeAgentId && agentMap.get(issue.assigneeAgentId)?.name) ||
+      "Coordinator";
+
+    if (stageAndGate.gate === "Requirement Approval") {
+      return {
+        type: "approve_requirement_package" as const,
+        stage: "Requirement Package",
+        title: "Requirement Package Approval",
+        buttonLabel:
+          linkedRequirementApproval?.status === "revision_requested" || linkedRequirementApproval?.status === "rejected"
+            ? "Request Requirement Approval Again"
+            : "Send Requirement Approval to PM",
+        description:
+          "Nếu BA đã hoàn tất requirement package nhưng chưa tự gửi gate, operator có thể gửi approval request này để PM review và luồng tiếp tục sang bước solutioning.",
+        requesterAgentName,
+        summary: "Review and approve the requirement package before technical solutioning starts.",
+        approval: linkedRequirementApproval,
+      };
+    }
+
+    if (stageAndGate.gate === "UX/UI Approval") {
+      return {
+        type: "approve_design_package" as const,
+        stage: "UX/UI Design",
+        title: "UX/UI Design Approval",
+        buttonLabel:
+          linkedDesignApproval?.status === "revision_requested" || linkedDesignApproval?.status === "rejected"
+            ? "Request UX/UI Approval Again"
+            : "Send UX/UI Approval for Review",
+        description:
+          "Nếu DESIGNER đã hoàn tất package nhưng chưa tự gửi gate, operator có thể gửi approval request này để PM/TECH LEAD review trước khi dev tiếp tục.",
+        requesterAgentName,
+        summary: "Review and approve the UX/UI design package before development starts.",
+        approval: linkedDesignApproval,
+      };
+    }
+
+    if (stageAndGate.gate === "QA Exit Approval") {
+      return {
+        type: "approve_qa_exit" as const,
+        stage: "QA Exit",
+        title: "QA Exit Approval",
+        buttonLabel:
+          linkedQaExitApproval?.status === "revision_requested" || linkedQaExitApproval?.status === "rejected"
+            ? "Request QA Exit Approval Again"
+            : "Send QA Exit Approval for Review",
+        description:
+          "Nếu QA đã hoàn tất validation nhưng chưa tự gửi gate, operator có thể gửi approval request này để delivery owner review trước khi sang UAT / go-live.",
+        requesterAgentName,
+        summary: "Review and approve QA exit readiness before UAT or go-live.",
+        approval: linkedQaExitApproval,
+      };
+    }
+
+    return null;
+  })();
   const handleFilePicked = async (evt: ChangeEvent<HTMLInputElement>) => {
     const files = evt.target.files;
     if (!files || files.length === 0) return;
@@ -1266,13 +1345,18 @@ export function IssueDetail() {
         )}
       </Tabs>
 
-      {issue && (
-        <div className="rounded-lg border border-border p-3">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <div className="text-sm font-medium">UX/UI Approval Gate</div>
-              <div className="text-xs text-muted-foreground">
-                Request approval for the design package before moving to the next workflow stage.
+      {issue && workflowApprovalAction && (
+        <div className="rounded-lg border border-border p-4 space-y-3">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="space-y-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="text-sm font-medium">Approval Assist</div>
+                <Badge variant="outline" className={cn("text-[11px]", gateBadgeClass(stageAndGate.gate))}>
+                  {workflowApprovalAction.title}
+                </Badge>
+              </div>
+              <div className="text-xs text-muted-foreground max-w-2xl">
+                {workflowApprovalAction.description}
               </div>
             </div>
             <Button
@@ -1282,92 +1366,45 @@ export function IssueDetail() {
               className="shrink-0"
               onClick={() =>
                 requestStageApproval.mutate({
-                  type: "approve_requirement_package",
-                  stage: "Requirement Package",
-                  summary: "Review and approve the requirement package before technical solutioning starts.",
+                  type: workflowApprovalAction.type,
+                  stage: workflowApprovalAction.stage,
+                  summary: workflowApprovalAction.summary,
                 })
               }
               disabled={
                 requestStageApproval.isPending ||
-                linkedRequirementApproval?.status === "pending" ||
-                linkedRequirementApproval?.status === "revision_requested"
+                workflowApprovalAction.approval?.status === "pending"
               }
             >
               <ShieldCheck className="mr-1.5 h-4 w-4" />
-              {linkedRequirementApproval ? "Requirement Requested" : "Request Requirement Approval"}
+              {workflowApprovalAction.approval?.status === "pending"
+                ? "Approval Request Sent"
+                : workflowApprovalAction.buttonLabel}
             </Button>
           </div>
-          {linkedRequirementApproval && (
-            <div className="mt-2 text-xs text-muted-foreground">
-              Requirement approval: <span className="font-medium">{linkedRequirementApproval.status}</span>
-            </div>
-          )}
-          <div className="mt-3 flex items-center justify-between gap-3">
-            <div>
-              <div className="text-sm font-medium">UX/UI Design Gate</div>
-              <div className="text-xs text-muted-foreground">
-                Request approval for the design package before development starts.
+
+          <div className="grid gap-3 md:grid-cols-3">
+            <div className="rounded-md border border-border/70 bg-muted/20 px-3 py-2">
+              <div className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">Current State</div>
+              <div className="mt-1 text-sm">
+                {workflowApprovalAction.approval
+                  ? `Approval ${workflowApprovalAction.approval.status.replace(/_/g, " ")}`
+                  : "Approval request missing"}
               </div>
             </div>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="shrink-0"
-              onClick={() =>
-                requestStageApproval.mutate({
-                  type: "approve_design_package",
-                  stage: "UX/UI Design",
-                  summary: "Review and approve the UX/UI design package before development starts.",
-                })
-              }
-              disabled={
-                requestStageApproval.isPending ||
-                linkedDesignApproval?.status === "pending" ||
-                linkedDesignApproval?.status === "revision_requested"
-              }
-            >
-              <ShieldCheck className="mr-1.5 h-4 w-4" />
-              {linkedDesignApproval ? "Design Requested" : "Request UX/UI Approval"}
-            </Button>
-          </div>
-          {linkedDesignApproval && (
-            <div className="mt-2 text-xs text-muted-foreground">
-              Design approval: <span className="font-medium">{linkedDesignApproval.status}</span>
+            <div className="rounded-md border border-border/70 bg-muted/20 px-3 py-2">
+              <div className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">Requester To Wake</div>
+              <div className="mt-1 text-sm">{workflowApprovalAction.requesterAgentName}</div>
             </div>
-          )}
-          <div className="mt-3 flex items-center justify-between gap-3">
-            <div>
-              <div className="text-sm font-medium">QA Exit Gate</div>
-              <div className="text-xs text-muted-foreground">
-                Request approval for QA internal validation before UAT or go-live readiness.
-              </div>
+            <div className="rounded-md border border-border/70 bg-muted/20 px-3 py-2">
+              <div className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">Effect</div>
+              <div className="mt-1 text-sm">Move issue to <span className="font-medium">in_review</span> and create linked approval</div>
             </div>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="shrink-0"
-              onClick={() =>
-                requestStageApproval.mutate({
-                  type: "approve_qa_exit",
-                  stage: "QA Exit",
-                  summary: "Review and approve QA exit readiness before UAT or go-live.",
-                })
-              }
-              disabled={
-                requestStageApproval.isPending ||
-                linkedQaExitApproval?.status === "pending" ||
-                linkedQaExitApproval?.status === "revision_requested"
-              }
-            >
-              <ShieldCheck className="mr-1.5 h-4 w-4" />
-              {linkedQaExitApproval ? "QA Exit Requested" : "Request QA Exit Approval"}
-            </Button>
           </div>
-          {linkedQaExitApproval && (
-            <div className="mt-2 text-xs text-muted-foreground">
-              QA exit approval: <span className="font-medium">{linkedQaExitApproval.status}</span>
+
+          {workflowApprovalAction.approval && (
+            <div className="text-xs text-muted-foreground">
+              Latest approval: <span className="font-medium">{workflowApprovalAction.approval.status}</span>
             </div>
           )}
         </div>

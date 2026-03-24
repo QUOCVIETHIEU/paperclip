@@ -25,8 +25,23 @@ function parseNumber(value: string | undefined, fallback: number) {
   return Math.floor(parsed);
 }
 
+function resolveJwtSecret() {
+  const explicitSecret =
+    process.env.PAPERCLIP_AGENT_JWT_SECRET?.trim() ||
+    process.env.BETTER_AUTH_SECRET?.trim() ||
+    "";
+  if (explicitSecret) return explicitSecret;
+
+  const deploymentMode = process.env.PAPERCLIP_DEPLOYMENT_MODE?.trim() || "local_trusted";
+  if (deploymentMode === "local_trusted") {
+    return "paperclip-local-agent-jwt";
+  }
+
+  return null;
+}
+
 function jwtConfig() {
-  const secret = process.env.PAPERCLIP_AGENT_JWT_SECRET;
+  const secret = resolveJwtSecret();
   if (!secret) return null;
 
   return {
