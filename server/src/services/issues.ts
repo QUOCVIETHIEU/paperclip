@@ -842,6 +842,13 @@ export function issueService(db: Db) {
           issueNumber,
           identifier,
         } as typeof issues.$inferInsert;
+        if (values.assigneeAgentId && values.lastAssignedAgentId === undefined) {
+          values.lastAssignedAgentId = values.assigneeAgentId;
+          values.lastAssignedUserId = null;
+        } else if (values.assigneeUserId && values.lastAssignedUserId === undefined) {
+          values.lastAssignedUserId = values.assigneeUserId;
+          values.lastAssignedAgentId = null;
+        }
         if (values.status === "in_progress" && !values.startedAt) {
           values.startedAt = new Date();
         }
@@ -895,6 +902,8 @@ export function issueService(db: Db) {
         issueData.assigneeAgentId !== undefined ? issueData.assigneeAgentId : existing.assigneeAgentId;
       const nextAssigneeUserId =
         issueData.assigneeUserId !== undefined ? issueData.assigneeUserId : existing.assigneeUserId;
+      const assigneeChanged =
+        issueData.assigneeAgentId !== undefined || issueData.assigneeUserId !== undefined;
 
       if (nextAssigneeAgentId && nextAssigneeUserId) {
         throw unprocessable("Issue can only have one assignee");
@@ -907,6 +916,18 @@ export function issueService(db: Db) {
       }
       if (issueData.assigneeUserId) {
         await assertAssignableUser(existing.companyId, issueData.assigneeUserId);
+      }
+      if (assigneeChanged) {
+        if (nextAssigneeAgentId) {
+          patch.lastAssignedAgentId = nextAssigneeAgentId;
+          patch.lastAssignedUserId = null;
+        } else if (nextAssigneeUserId) {
+          patch.lastAssignedAgentId = null;
+          patch.lastAssignedUserId = nextAssigneeUserId;
+        } else {
+          patch.lastAssignedAgentId = existing.assigneeAgentId ?? existing.lastAssignedAgentId ?? null;
+          patch.lastAssignedUserId = existing.assigneeUserId ?? existing.lastAssignedUserId ?? null;
+        }
       }
       const nextProjectId = issueData.projectId !== undefined ? issueData.projectId : existing.projectId;
       const nextProjectWorkspaceId =
@@ -1242,6 +1263,8 @@ export function issueService(db: Db) {
         .update(issues)
         .set({
           status: "todo",
+          lastAssignedAgentId: existing.assigneeAgentId ?? existing.lastAssignedAgentId ?? null,
+          lastAssignedUserId: existing.assigneeUserId ?? existing.lastAssignedUserId ?? null,
           assigneeAgentId: null,
           checkoutRunId: null,
           updatedAt: new Date(),
@@ -1617,7 +1640,9 @@ export function issueService(db: Db) {
       const raw: Array<{
         id: string; identifier: string | null; title: string; description: string | null;
         status: string; priority: string;
-        assigneeAgentId: string | null; projectId: string | null; goalId: string | null;
+        assigneeAgentId: string | null; assigneeUserId: string | null;
+        lastAssignedAgentId: string | null; lastAssignedUserId: string | null;
+        projectId: string | null; goalId: string | null;
       }> = [];
       const visited = new Set<string>([issueId]);
       const start = await db.select().from(issues).where(eq(issues.id, issueId)).then(r => r[0] ?? null);
@@ -1627,7 +1652,9 @@ export function issueService(db: Db) {
         const parent = await db.select({
           id: issues.id, identifier: issues.identifier, title: issues.title, description: issues.description,
           status: issues.status, priority: issues.priority,
-          assigneeAgentId: issues.assigneeAgentId, projectId: issues.projectId,
+          assigneeAgentId: issues.assigneeAgentId, assigneeUserId: issues.assigneeUserId,
+          lastAssignedAgentId: issues.lastAssignedAgentId, lastAssignedUserId: issues.lastAssignedUserId,
+          projectId: issues.projectId,
           goalId: issues.goalId, parentId: issues.parentId,
         }).from(issues).where(eq(issues.id, currentId)).then(r => r[0] ?? null);
         if (!parent) break;
@@ -1635,6 +1662,9 @@ export function issueService(db: Db) {
           id: parent.id, identifier: parent.identifier ?? null, title: parent.title, description: parent.description ?? null,
           status: parent.status, priority: parent.priority,
           assigneeAgentId: parent.assigneeAgentId ?? null,
+          assigneeUserId: parent.assigneeUserId ?? null,
+          lastAssignedAgentId: parent.lastAssignedAgentId ?? null,
+          lastAssignedUserId: parent.lastAssignedUserId ?? null,
           projectId: parent.projectId ?? null, goalId: parent.goalId ?? null,
         });
         currentId = parent.parentId ?? null;

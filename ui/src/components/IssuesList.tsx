@@ -12,11 +12,9 @@ import { timeAgo } from "../lib/timeAgo";
 import { StatusIcon } from "./StatusIcon";
 import { PriorityIcon } from "./PriorityIcon";
 import { EmptyState } from "./EmptyState";
-import { Identity } from "./Identity";
 import { IssueRow } from "./IssueRow";
 import { PageSkeleton } from "./PageSkeleton";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -29,6 +27,7 @@ import type { Issue } from "@paperclipai/shared";
 
 const statusOrder = ["in_progress", "todo", "backlog", "in_review", "blocked", "done", "cancelled"];
 const priorityOrder = ["critical", "high", "medium", "low"];
+const DESKTOP_META_GRID_CLASS = "w-[520px] grid-cols-[120px_120px_120px_120px] gap-3";
 
 function statusLabel(status: string): string {
   return status.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
@@ -39,59 +38,6 @@ function compactUserLabel(userId: string | null | undefined, currentUserId?: str
   return formatAssigneeUserLabel(userId, currentUserId) ?? "Board";
 }
 
-function inferStageAndGate(issue: Issue, assigneeName: string | null) {
-  const role = assigneeName?.toUpperCase() ?? "";
-  if (role.includes("CTO")) {
-    return { stage: "Inquiry / Intake", gate: "—" };
-  }
-  if (role.includes("BA")) {
-    return { stage: "Requirement Definition", gate: "Requirement Approval" };
-  }
-  if (role.includes("TECH LEAD")) {
-    return { stage: "Solutioning", gate: "—" };
-  }
-  if (role.includes("DESIGNER")) {
-    return { stage: "UX/UI Design", gate: "UX/UI Approval" };
-  }
-  if (role.includes("QA")) {
-    return { stage: "QA Validation", gate: "QA Exit Approval" };
-  }
-  if (role.includes("SD")) {
-    return { stage: "Service Desk", gate: "—" };
-  }
-  if (
-    role.includes("FE") ||
-    role.includes("BE") ||
-    role.includes("INTEGRATION") ||
-    role.includes("DEVOPS")
-  ) {
-    return { stage: "Development", gate: "—" };
-  }
-  if (role.includes("PM")) {
-    return { stage: "Delivery Coordination", gate: "—" };
-  }
-  return { stage: issue.status === "done" ? "Completed" : "Execution", gate: "—" };
-}
-
-function stageBadgeClass(stage: string) {
-  if (stage === "Inquiry / Intake") return "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300";
-  if (stage === "Requirement Definition") return "border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300";
-  if (stage === "Solutioning") return "border-violet-500/30 bg-violet-500/10 text-violet-700 dark:text-violet-300";
-  if (stage === "UX/UI Design") return "border-pink-500/30 bg-pink-500/10 text-pink-700 dark:text-pink-300";
-  if (stage === "Development") return "border-cyan-500/30 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300";
-  if (stage === "QA Validation") return "border-orange-500/30 bg-orange-500/10 text-orange-700 dark:text-orange-300";
-  if (stage === "Service Desk") return "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
-  if (stage === "Delivery Coordination") return "border-indigo-500/30 bg-indigo-500/10 text-indigo-700 dark:text-indigo-300";
-  if (stage === "Completed") return "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
-  return "border-border bg-muted text-muted-foreground";
-}
-
-function gateBadgeClass(gate: string) {
-  if (gate === "Requirement Approval") return "border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300";
-  if (gate === "UX/UI Approval") return "border-pink-500/30 bg-pink-500/10 text-pink-700 dark:text-pink-300";
-  if (gate === "QA Exit Approval") return "border-orange-500/30 bg-orange-500/10 text-orange-700 dark:text-orange-300";
-  return "border-border bg-muted text-muted-foreground";
-}
 
 /* ── View state ── */
 
@@ -251,8 +197,6 @@ export function IssuesList({
     }
     return getViewState(scopedKey);
   });
-  const [assigneePickerIssueId, setAssigneePickerIssueId] = useState<string | null>(null);
-  const [assigneeSearch, setAssigneeSearch] = useState("");
   const [issueSearch, setIssueSearch] = useState(initialSearch ?? "");
   const [debouncedIssueSearch, setDebouncedIssueSearch] = useState(issueSearch);
   const normalizedIssueSearch = debouncedIssueSearch.trim();
@@ -298,39 +242,18 @@ export function IssuesList({
     return agents.find((a) => a.id === id)?.name ?? null;
   }, [agents]);
 
-  const issueById = useMemo(() => new Map(issues.map((issue) => [issue.id, issue])), [issues]);
-
   const createdByLabel = useCallback((issue: Issue) => {
     if (issue.createdByAgentId) return agentName(issue.createdByAgentId) ?? "Agent";
     return compactUserLabel(issue.createdByUserId, currentUserId) ?? "System";
   }, [agentName, currentUserId]);
 
   const assigneeLabel = useCallback((issue: Issue) => {
-    if (issue.assigneeAgentId) return agentName(issue.assigneeAgentId) ?? "Agent";
-    if (issue.assigneeUserId) return compactUserLabel(issue.assigneeUserId, currentUserId) ?? "User";
+    const assigneeAgentId = issue.assigneeAgentId ?? issue.lastAssignedAgentId;
+    const assigneeUserId = issue.assigneeUserId ?? issue.lastAssignedUserId;
+    if (assigneeAgentId) return agentName(assigneeAgentId) ?? "Agent";
+    if (assigneeUserId) return compactUserLabel(assigneeUserId, currentUserId) ?? "User";
     return "Unassigned";
   }, [agentName, currentUserId]);
-
-  const parentLabel = useCallback((issue: Issue) => {
-    if (!issue.parentId) return "Root";
-    const parent = issueById.get(issue.parentId);
-    return parent?.identifier ?? parent?.id.slice(0, 8) ?? "Parent";
-  }, [issueById]);
-
-  const workflowChainLabel = useCallback((issue: Issue) => {
-    const path: Issue[] = [];
-    const visited = new Set<string>();
-    let current: Issue | undefined = issue;
-    while (current && !visited.has(current.id) && path.length < 12) {
-      visited.add(current.id);
-      path.push(current);
-      current = current.parentId ? issueById.get(current.parentId) : undefined;
-    }
-    return path
-      .reverse()
-      .map((node) => assigneeLabel(node))
-      .join(" -> ");
-  }, [assigneeLabel, issueById]);
 
   const filtered = useMemo(() => {
     const sourceIssues = normalizedIssueSearch.length > 0 ? searchedIssues : issues;
@@ -391,12 +314,6 @@ export function IssuesList({
       }
     }
     return defaults;
-  };
-
-  const assignIssue = (issueId: string, assigneeAgentId: string | null, assigneeUserId: string | null = null) => {
-    onUpdateIssue(issueId, { assigneeAgentId, assigneeUserId });
-    setAssigneePickerIssueId(null);
-    setAssigneeSearch("");
   };
 
   return (
@@ -689,13 +606,11 @@ export function IssuesList({
       {!isLoading && filtered.length > 0 && viewState.viewMode === "list" && (
         <div className="hidden items-center border-b border-border px-1 pb-2 text-[11px] uppercase tracking-wide text-muted-foreground lg:flex">
           <div className="min-w-0 flex-1">Issue</div>
-          <div className="ml-auto grid w-[860px] grid-cols-[120px_120px_100px_220px_140px_120px] gap-3 text-left">
-            <span>From</span>
-            <span>To</span>
-            <span>Parent</span>
-            <span>Flow</span>
-            <span>Stage / Gate</span>
-            <span>Updated</span>
+          <div className={cn("ml-auto grid text-left", DESKTOP_META_GRID_CLASS)}>
+            <span className="justify-self-start">From</span>
+            <span className="justify-self-start">To</span>
+            <span className="justify-self-center text-center">Updated</span>
+            <span className="justify-self-start">Datetime</span>
           </div>
         </div>
       )}
@@ -794,44 +709,6 @@ export function IssuesList({
                   mobileMeta={timeAgo(issue.updatedAt)}
                   desktopTrailing={(
                     <>
-                      <div className="hidden w-[740px] grid-cols-[120px_120px_100px_220px_140px] gap-3 lg:grid">
-                        <div className="min-w-0">
-                          <div className="truncate text-[11px] uppercase tracking-wide text-muted-foreground">From</div>
-                          <div className="truncate text-xs">{createdByLabel(issue)}</div>
-                        </div>
-                        <div className="min-w-0">
-                          <div className="truncate text-[11px] uppercase tracking-wide text-muted-foreground">To</div>
-                          <div className="truncate text-xs">{assigneeLabel(issue)}</div>
-                        </div>
-                        <div className="min-w-0">
-                          <div className="truncate text-[11px] uppercase tracking-wide text-muted-foreground">Parent</div>
-                          <div className="truncate text-xs">{parentLabel(issue)}</div>
-                        </div>
-                        <div className="min-w-0">
-                          <div className="truncate text-[11px] uppercase tracking-wide text-muted-foreground">Flow</div>
-                          <div className="truncate text-xs">{workflowChainLabel(issue)}</div>
-                        </div>
-                        <div className="min-w-0">
-                          <div className="truncate text-[11px] uppercase tracking-wide text-muted-foreground">Stage / Gate</div>
-                          <div className="flex flex-wrap gap-1 pt-0.5">
-                            {(() => {
-                              const { stage, gate } = inferStageAndGate(issue, issue.assigneeAgentId ? (agentName(issue.assigneeAgentId) ?? null) : null);
-                              return (
-                                <>
-                                  <Badge variant="outline" className={cn("px-1.5 py-0 text-[10px]", stageBadgeClass(stage))}>
-                                    {stage}
-                                  </Badge>
-                                  {gate !== "—" && (
-                                    <Badge variant="outline" className={cn("px-1.5 py-0 text-[10px]", gateBadgeClass(gate))}>
-                                      {gate}
-                                    </Badge>
-                                  )}
-                                </>
-                              );
-                            })()}
-                          </div>
-                        </div>
-                      </div>
                       {(issue.labels ?? []).length > 0 && (
                         <span className="hidden items-center gap-1 overflow-hidden md:flex md:max-w-[240px]">
                           {(issue.labels ?? []).slice(0, 3).map((label) => (
@@ -854,112 +731,14 @@ export function IssuesList({
                           )}
                         </span>
                       )}
-                      <Popover
-                        open={assigneePickerIssueId === issue.id}
-                        onOpenChange={(open) => {
-                          setAssigneePickerIssueId(open ? issue.id : null);
-                          if (!open) setAssigneeSearch("");
-                        }}
-                      >
-                        <PopoverTrigger asChild>
-                          <button
-                            className="flex w-[180px] shrink-0 items-center rounded-md px-2 py-1 transition-colors hover:bg-accent/50"
-                            onClick={(e) => {
-                              e.preventDefault();
-                              e.stopPropagation();
-                            }}
-                          >
-                            {issue.assigneeAgentId && agentName(issue.assigneeAgentId) ? (
-                              <Identity name={agentName(issue.assigneeAgentId)!} size="sm" />
-                            ) : issue.assigneeUserId ? (
-                              <span className="inline-flex items-center gap-1.5 text-xs">
-                                <span className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-dashed border-muted-foreground/35 bg-muted/30">
-                                  <User className="h-3 w-3" />
-                                </span>
-                                {formatAssigneeUserLabel(issue.assigneeUserId, currentUserId) ?? "User"}
-                              </span>
-                            ) : (
-                              <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
-                                <span className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-dashed border-muted-foreground/35 bg-muted/30">
-                                  <User className="h-3 w-3" />
-                                </span>
-                                Assignee
-                              </span>
-                            )}
-                          </button>
-                        </PopoverTrigger>
-                        <PopoverContent
-                          className="w-56 p-1"
-                          align="end"
-                          onClick={(e) => e.stopPropagation()}
-                          onPointerDownOutside={() => setAssigneeSearch("")}
-                        >
-                          <input
-                            className="mb-1 w-full border-b border-border bg-transparent px-2 py-1.5 text-xs outline-none placeholder:text-muted-foreground/50"
-                            placeholder="Search assignees..."
-                            value={assigneeSearch}
-                            onChange={(e) => setAssigneeSearch(e.target.value)}
-                            autoFocus
-                          />
-                          <div className="max-h-48 overflow-y-auto overscroll-contain">
-                            <button
-                              className={cn(
-                                "flex w-full items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-accent/50",
-                                !issue.assigneeAgentId && !issue.assigneeUserId && "bg-accent",
-                              )}
-                              onClick={(e) => {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                assignIssue(issue.id, null, null);
-                              }}
-                            >
-                              No assignee
-                            </button>
-                            {currentUserId && (
-                              <button
-                                className={cn(
-                                  "flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent/50",
-                                  issue.assigneeUserId === currentUserId && "bg-accent",
-                                )}
-                                onClick={(e) => {
-                                  e.preventDefault();
-                                  e.stopPropagation();
-                                  assignIssue(issue.id, null, currentUserId);
-                                }}
-                              >
-                                <User className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                                <span>Me</span>
-                              </button>
-                            )}
-                            {(agents ?? [])
-                              .filter((agent) => {
-                                if (!assigneeSearch.trim()) return true;
-                                return agent.name
-                                  .toLowerCase()
-                                  .includes(assigneeSearch.toLowerCase());
-                              })
-                              .map((agent) => (
-                                <button
-                                  key={agent.id}
-                                  className={cn(
-                                    "flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent/50",
-                                    issue.assigneeAgentId === agent.id && "bg-accent",
-                                  )}
-                                  onClick={(e) => {
-                                    e.preventDefault();
-                                    e.stopPropagation();
-                                    assignIssue(issue.id, agent.id, null);
-                                  }}
-                                >
-                                  <Identity name={agent.name} size="sm" className="min-w-0" />
-                                </button>
-                              ))}
-                          </div>
-                        </PopoverContent>
-                      </Popover>
+                      <div className={cn("hidden lg:grid", DESKTOP_META_GRID_CLASS)}>
+                        <div className="min-w-0 justify-self-start truncate text-xs text-left">{createdByLabel(issue)}</div>
+                        <div className="min-w-0 justify-self-start truncate text-xs text-left">{assigneeLabel(issue)}</div>
+                        <div className="min-w-0 justify-self-center truncate text-xs text-center">{timeAgo(issue.updatedAt)}</div>
+                        <div className="min-w-0 justify-self-start truncate text-xs text-left">{formatDate(issue.createdAt)}</div>
+                      </div>
                     </>
                   )}
-                  trailingMeta={formatDate(issue.createdAt)}
                 />
               ))}
             </CollapsibleContent>

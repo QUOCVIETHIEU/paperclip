@@ -734,10 +734,12 @@ export function IssueDetail() {
   const createdByLabel = issue.createdByAgentId
     ? (agentMap.get(issue.createdByAgentId)?.name ?? "Agent")
     : (compactUserLabel(issue.createdByUserId, currentUserId) ?? "System");
-  const assigneeLabel = issue.assigneeAgentId
-    ? (agentMap.get(issue.assigneeAgentId)?.name ?? "Agent")
-    : issue.assigneeUserId
-      ? (compactUserLabel(issue.assigneeUserId, currentUserId) ?? "User")
+  const displayAssigneeAgentId = issue.assigneeAgentId ?? issue.lastAssignedAgentId;
+  const displayAssigneeUserId = issue.assigneeUserId ?? issue.lastAssignedUserId;
+  const assigneeLabel = displayAssigneeAgentId
+    ? (agentMap.get(displayAssigneeAgentId)?.name ?? "Agent")
+    : displayAssigneeUserId
+      ? (compactUserLabel(displayAssigneeUserId, currentUserId) ?? "User")
       : "Unassigned";
   const parentRef = issue.parentId
     ? (ancestors[0]?.identifier ?? issue.parentId.slice(0, 8))
@@ -745,8 +747,10 @@ export function IssueDetail() {
   const workflowChain = [...ancestors]
     .reverse()
     .map((ancestor) => {
-      if (ancestor.assigneeAgentId) return agentMap.get(ancestor.assigneeAgentId)?.name ?? "Agent";
-      if (ancestor.assigneeUserId) return compactUserLabel(ancestor.assigneeUserId, currentUserId) ?? "Board";
+      const ancestorAssigneeAgentId = ancestor.assigneeAgentId ?? ancestor.lastAssignedAgentId;
+      const ancestorAssigneeUserId = ancestor.assigneeUserId ?? ancestor.lastAssignedUserId;
+      if (ancestorAssigneeAgentId) return agentMap.get(ancestorAssigneeAgentId)?.name ?? "Agent";
+      if (ancestorAssigneeUserId) return compactUserLabel(ancestorAssigneeUserId, currentUserId) ?? "Board";
       return "Unassigned";
     })
     .concat(assigneeLabel)

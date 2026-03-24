@@ -31,6 +31,8 @@ export interface IssueAncestor {
   priority: string;
   assigneeAgentId: string | null;
   assigneeUserId: string | null;
+  lastAssignedAgentId: string | null;
+  lastAssignedUserId: string | null;
   projectId: string | null;
   goalId: string | null;
   project: IssueAncestorProject | null;
@@ -133,6 +135,8 @@ export interface Issue {
   priority: IssuePriority;
   assigneeAgentId: string | null;
   assigneeUserId: string | null;
+  lastAssignedAgentId: string | null;
+  lastAssignedUserId: string | null;
   checkoutRunId: string | null;
   executionRunId: string | null;
   executionAgentNameKey: string | null;

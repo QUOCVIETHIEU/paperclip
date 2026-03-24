@@ -13,7 +13,6 @@ import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
 import { createIssueDetailLocationState } from "../lib/issueDetailBreadcrumb";
-import { cn } from "../lib/utils";
 import { EmptyState } from "../components/EmptyState";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { IssueRow } from "../components/IssueRow";
@@ -23,7 +22,6 @@ import { StatusBadge } from "../components/StatusBadge";
 import { defaultTypeIcon, typeIcon, typeLabel } from "../components/ApprovalPayload";
 import { timeAgo } from "../lib/timeAgo";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Tabs } from "@/components/ui/tabs";
 import {
@@ -88,40 +86,6 @@ function compactUserLabel(userId: string | null | undefined, currentUserId?: str
   return userId === currentUserId ? "Me" : "Board";
 }
 
-function inferStageAndGate(issue: Issue, assigneeName: string | null) {
-  const role = assigneeName?.toUpperCase() ?? "";
-  if (role.includes("CTO")) return { stage: "Inquiry / Intake", gate: "—" };
-  if (role.includes("BA")) return { stage: "Requirement Definition", gate: "Requirement Approval" };
-  if (role.includes("TECH LEAD")) return { stage: "Solutioning", gate: "—" };
-  if (role.includes("DESIGNER")) return { stage: "UX/UI Design", gate: "UX/UI Approval" };
-  if (role.includes("QA")) return { stage: "QA Validation", gate: "QA Exit Approval" };
-  if (role.includes("SD")) return { stage: "Service Desk", gate: "—" };
-  if (role.includes("FE") || role.includes("BE") || role.includes("INTEGRATION") || role.includes("DEVOPS")) {
-    return { stage: "Development", gate: "—" };
-  }
-  if (role.includes("PM")) return { stage: "Delivery Coordination", gate: "—" };
-  return { stage: issue.status === "done" ? "Completed" : "Execution", gate: "—" };
-}
-
-function stageBadgeClass(stage: string) {
-  if (stage === "Inquiry / Intake") return "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300";
-  if (stage === "Requirement Definition") return "border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300";
-  if (stage === "Solutioning") return "border-violet-500/30 bg-violet-500/10 text-violet-700 dark:text-violet-300";
-  if (stage === "UX/UI Design") return "border-pink-500/30 bg-pink-500/10 text-pink-700 dark:text-pink-300";
-  if (stage === "Development") return "border-cyan-500/30 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300";
-  if (stage === "QA Validation") return "border-orange-500/30 bg-orange-500/10 text-orange-700 dark:text-orange-300";
-  if (stage === "Service Desk") return "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
-  if (stage === "Delivery Coordination") return "border-indigo-500/30 bg-indigo-500/10 text-indigo-700 dark:text-indigo-300";
-  if (stage === "Completed") return "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
-  return "border-border bg-muted text-muted-foreground";
-}
-
-function gateBadgeClass(gate: string) {
-  if (gate === "Requirement Approval") return "border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300";
-  if (gate === "UX/UI Approval") return "border-pink-500/30 bg-pink-500/10 text-pink-700 dark:text-pink-300";
-  if (gate === "QA Exit Approval") return "border-orange-500/30 bg-orange-500/10 text-orange-700 dark:text-orange-300";
-  return "border-border bg-muted text-muted-foreground";
-}
 
 function runFailureMessage(run: HeartbeatRun): string {
   return firstNonEmptyLine(run.error) ?? firstNonEmptyLine(run.stderrExcerpt) ?? "Run exited with an error.";
@@ -543,33 +507,15 @@ export function Inbox() {
   }, [currentUserId]);
 
   const assigneeDisplayLabel = useCallback((issue: Issue) => {
-    if (issue.assigneeAgentId) return agentName(issue.assigneeAgentId) ?? "Agent";
-    if (issue.assigneeUserId) {
-      return compactUserLabel(issue.assigneeUserId, currentUserId) ?? "User";
+    const assigneeAgentId = issue.assigneeAgentId ?? issue.lastAssignedAgentId;
+    const assigneeUserId = issue.assigneeUserId ?? issue.lastAssignedUserId;
+    if (assigneeAgentId) return agentName(assigneeAgentId) ?? "Agent";
+    if (assigneeUserId) {
+      return compactUserLabel(assigneeUserId, currentUserId) ?? "User";
     }
     return "Unassigned";
   }, [currentUserId]);
 
-  const parentDisplayLabel = useCallback((issue: Issue) => {
-    if (!issue.parentId) return "Root";
-    const parent = issueById.get(issue.parentId);
-    return parent?.identifier ?? parent?.id.slice(0, 8) ?? "Parent";
-  }, [issueById]);
-
-  const workflowChainLabel = useCallback((issue: Issue) => {
-    const path: Issue[] = [];
-    const visited = new Set<string>();
-    let current: Issue | undefined = issue;
-    while (current && !visited.has(current.id) && path.length < 12) {
-      visited.add(current.id);
-      path.push(current);
-      current = current.parentId ? issueById.get(current.parentId) : undefined;
-    }
-    return path
-      .reverse()
-      .map((node) => assigneeDisplayLabel(node))
-      .join(" -> ");
-  }, [assigneeDisplayLabel, issueById]);
 
   const approveMutation = useMutation({
     mutationFn: (id: string) => approvalsApi.approve(id),
@@ -873,53 +819,18 @@ export function Inbox() {
                         : `updated ${timeAgo(issue.updatedAt)}`
                     }
                     desktopTrailing={(
-                      <div className="hidden w-[740px] grid-cols-[120px_120px_100px_220px_140px] gap-3 lg:grid">
-                        <div className="min-w-0">
-                          <div className="truncate text-[11px] uppercase tracking-wide text-muted-foreground">From</div>
-                          <div className="truncate text-xs">{createdByLabel(issue)}</div>
-                        </div>
-                        <div className="min-w-0">
-                          <div className="truncate text-[11px] uppercase tracking-wide text-muted-foreground">To</div>
-                          <div className="truncate text-xs">{assigneeDisplayLabel(issue)}</div>
-                        </div>
-                        <div className="min-w-0">
-                          <div className="truncate text-[11px] uppercase tracking-wide text-muted-foreground">Parent</div>
-                          <div className="truncate text-xs">{parentDisplayLabel(issue)}</div>
-                        </div>
-                        <div className="min-w-0">
-                          <div className="truncate text-[11px] uppercase tracking-wide text-muted-foreground">Flow</div>
-                          <div className="truncate text-xs">{workflowChainLabel(issue)}</div>
-                        </div>
-                        <div className="min-w-0">
-                          <div className="truncate text-[11px] uppercase tracking-wide text-muted-foreground">Stage / Gate</div>
-                          <div className="flex flex-wrap gap-1 pt-0.5">
-                            {(() => {
-                              const assignee = issue.assigneeAgentId ? (agentName(issue.assigneeAgentId) ?? null) : null;
-                              const { stage, gate } = inferStageAndGate(issue, assignee);
-                              return (
-                                <>
-                                  <Badge variant="outline" className={cn("px-1.5 py-0 text-[10px]", stageBadgeClass(stage))}>
-                                    {stage}
-                                  </Badge>
-                                  {gate !== "—" && (
-                                    <Badge variant="outline" className={cn("px-1.5 py-0 text-[10px]", gateBadgeClass(gate))}>
-                                      {gate}
-                                    </Badge>
-                                  )}
-                                </>
-                              );
-                            })()}
-                          </div>
+                      <div className="hidden w-[380px] grid-cols-[120px_120px_120px] gap-3 lg:grid">
+                        <div className="min-w-0 truncate text-xs">{createdByLabel(issue)}</div>
+                        <div className="min-w-0 truncate text-xs">{assigneeDisplayLabel(issue)}</div>
+                        <div className="min-w-0 truncate text-xs">
+                          {issue.lastExternalCommentAt
+                            ? `commented ${timeAgo(issue.lastExternalCommentAt)}`
+                            : `updated ${timeAgo(issue.updatedAt)}`}
                         </div>
                       </div>
                     )}
                     unreadState={isUnread ? "visible" : isFading ? "fading" : "hidden"}
                     onMarkRead={() => markReadMutation.mutate(issue.id)}
-                    trailingMeta={
-                      issue.lastExternalCommentAt
-                        ? `commented ${timeAgo(issue.lastExternalCommentAt)}`
-                        : `updated ${timeAgo(issue.updatedAt)}`
-                    }
                   />
                 );
               })}

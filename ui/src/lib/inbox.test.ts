@@ -135,6 +135,8 @@ function makeIssue(id: string, isUnreadForMe: boolean): Issue {
     priority: "medium",
     assigneeAgentId: null,
     assigneeUserId: null,
+    lastAssignedAgentId: null,
+    lastAssignedUserId: null,
     createdByAgentId: null,
     createdByUserId: null,
     issueNumber: 1,
