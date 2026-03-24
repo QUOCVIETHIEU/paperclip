@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { agentsApi, type AgentKey, type ClaudeLoginResult, type AvailableSkill } from "../api/agents";
 import { budgetsApi } from "../api/budgets";
 import { heartbeatsApi } from "../api/heartbeats";
+import { approvalsApi } from "../api/approvals";
 import { ApiError } from "../api/client";
 import { ChartCard, RunActivityChart, PriorityChart, IssueStatusChart, SuccessRateChart } from "../components/ActivityCharts";
 import { activityApi } from "../api/activity";
@@ -26,6 +27,7 @@ import { EntityRow } from "../components/EntityRow";
 import { Identity } from "../components/Identity";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { BudgetPolicyCard } from "../components/BudgetPolicyCard";
+import { ApprovalCard } from "../components/ApprovalCard";
 import { ScrollToBottom } from "../components/ScrollToBottom";
 import { formatCents, formatDate, relativeTime, formatTokens, visibleRunCostUsd } from "../lib/utils";
 import { cn } from "../lib/utils";
@@ -70,6 +72,7 @@ import {
   type AgentRuntimeState,
   type LiveEvent,
   type WorkspaceOperation,
+  type Approval,
 } from "@paperclipai/shared";
 import { redactHomePathUserSegments, redactHomePathUserSegmentsInValue } from "@paperclipai/adapter-utils";
 import { agentRouteRef } from "../lib/utils";
@@ -187,10 +190,11 @@ function scrollToContainerBottom(container: ScrollContainer, behavior: ScrollBeh
   container.scrollTo({ top: container.scrollHeight, behavior });
 }
 
-type AgentDetailView = "dashboard" | "configuration" | "skills" | "runs" | "budget";
+type AgentDetailView = "dashboard" | "workflow" | "configuration" | "skills" | "runs" | "budget";
 
 function parseAgentDetailView(value: string | null): AgentDetailView {
   if (value === "configure" || value === "configuration") return "configuration";
+  if (value === "workflow") return value;
   if (value === "skills") return value;
   if (value === "budget") return value;
   if (value === "runs") return value;
@@ -520,6 +524,12 @@ export function AgentDetail() {
     enabled: !!resolvedCompanyId,
   });
 
+  const { data: allApprovals } = useQuery({
+    queryKey: queryKeys.approvals.list(resolvedCompanyId!),
+    queryFn: () => approvalsApi.list(resolvedCompanyId!),
+    enabled: !!resolvedCompanyId,
+  });
+
   const { data: budgetOverview } = useQuery({
     queryKey: queryKeys.budgets.overview(resolvedCompanyId ?? "__none__"),
     queryFn: () => budgetsApi.overview(resolvedCompanyId!),
@@ -580,6 +590,8 @@ export function AgentDetail() {
     const canonicalTab =
       activeView === "configuration"
         ? "configuration"
+        : activeView === "workflow"
+          ? "workflow"
         : activeView === "skills"
           ? "skills"
           : activeView === "runs"
@@ -687,6 +699,32 @@ export function AgentDetail() {
     },
   });
 
+  const approveApprovalMutation = useMutation({
+    mutationFn: (approvalId: string) => approvalsApi.approve(approvalId),
+    onSuccess: () => {
+      setActionError(null);
+      if (!resolvedCompanyId) return;
+      queryClient.invalidateQueries({ queryKey: queryKeys.approvals.list(resolvedCompanyId) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.issues.list(resolvedCompanyId) });
+    },
+    onError: (err) => {
+      setActionError(err instanceof Error ? err.message : "Failed to approve");
+    },
+  });
+
+  const rejectApprovalMutation = useMutation({
+    mutationFn: (approvalId: string) => approvalsApi.reject(approvalId),
+    onSuccess: () => {
+      setActionError(null);
+      if (!resolvedCompanyId) return;
+      queryClient.invalidateQueries({ queryKey: queryKeys.approvals.list(resolvedCompanyId) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.issues.list(resolvedCompanyId) });
+    },
+    onError: (err) => {
+      setActionError(err instanceof Error ? err.message : "Failed to reject");
+    },
+  });
+
   useEffect(() => {
     const crumbs: { label: string; href?: string }[] = [
       { label: "Agents", href: "/agents" },
@@ -701,6 +739,8 @@ export function AgentDetail() {
         crumbs.push({ label: `Run ${urlRunId.slice(0, 8)}` });
       } else if (activeView === "configuration") {
         crumbs.push({ label: "Configuration" });
+      } else if (activeView === "workflow") {
+        crumbs.push({ label: "Workflow" });
       // } else if (activeView === "skills") { // TODO: bring back later
       //   crumbs.push({ label: "Skills" });
       } else if (activeView === "runs") {
@@ -861,6 +901,7 @@ export function AgentDetail() {
           <PageTabBar
             items={[
               { value: "dashboard", label: "Dashboard" },
+              { value: "workflow", label: "Workflow" },
               { value: "configuration", label: "Configuration" },
               // { value: "skills", label: "Skills" }, // TODO: bring back later
               { value: "runs", label: "Runs" },
@@ -939,6 +980,17 @@ export function AgentDetail() {
           runtimeState={runtimeState}
           agentId={agent.id}
           agentRouteId={canonicalAgentRef}
+        />
+      )}
+
+      {activeView === "workflow" && resolvedCompanyId && (
+        <WorkflowTab
+          agent={agent}
+          approvals={allApprovals ?? []}
+          agents={allAgents ?? []}
+          isMutating={approveApprovalMutation.isPending || rejectApprovalMutation.isPending}
+          onApprove={(approvalId) => approveApprovalMutation.mutate(approvalId)}
+          onReject={(approvalId) => rejectApprovalMutation.mutate(approvalId)}
         />
       )}
 
@@ -1139,6 +1191,130 @@ function AgentOverview({
         <h3 className="text-sm font-medium">Costs</h3>
         <CostsSection runtimeState={runtimeState} runs={runs} />
       </div>
+    </div>
+  );
+}
+
+type WorkflowFilter = "pending" | "approved" | "rejected" | "all";
+
+function approvalRequestedFor(approval: Approval): string | null {
+  const raw = (approval.payload as Record<string, unknown> | null)?.requestedFor;
+  return typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : null;
+}
+
+function WorkflowTab({
+  agent,
+  approvals,
+  agents,
+  isMutating,
+  onApprove,
+  onReject,
+}: {
+  agent: Agent;
+  approvals: Approval[];
+  agents: Agent[];
+  isMutating: boolean;
+  onApprove: (approvalId: string) => void;
+  onReject: (approvalId: string) => void;
+}) {
+  const [filter, setFilter] = useState<WorkflowFilter>("pending");
+
+  const relevantApprovals = useMemo(() => {
+    const agentName = agent.name.trim().toLowerCase();
+    return approvals
+      .filter((approval) => {
+        const requestedFor = approvalRequestedFor(approval)?.toLowerCase() ?? "";
+        return approval.requestedByAgentId === agent.id || requestedFor === agentName;
+      })
+      .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+  }, [agent.id, agent.name, approvals]);
+
+  const counts = useMemo(() => {
+    const pending = relevantApprovals.filter(
+      (approval) => approval.status === "pending" || approval.status === "revision_requested",
+    ).length;
+    const approved = relevantApprovals.filter((approval) => approval.status === "approved").length;
+    const rejected = relevantApprovals.filter((approval) => approval.status === "rejected").length;
+    return { pending, approved, rejected, all: relevantApprovals.length };
+  }, [relevantApprovals]);
+
+  const filteredApprovals = useMemo(() => {
+    if (filter === "all") return relevantApprovals;
+    if (filter === "pending") {
+      return relevantApprovals.filter(
+        (approval) => approval.status === "pending" || approval.status === "revision_requested",
+      );
+    }
+    return relevantApprovals.filter((approval) => approval.status === filter);
+  }, [filter, relevantApprovals]);
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h3 className="text-lg font-semibold">Workflow</h3>
+          <p className="text-sm text-muted-foreground">
+            Review approvals routed through or back to {agent.name}.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button variant={filter === "pending" ? "default" : "outline"} size="sm" onClick={() => setFilter("pending")}>
+            Pending
+            {counts.pending > 0 && <span className="ml-1.5 rounded-full bg-background/20 px-1.5 py-0.5 text-[10px]">{counts.pending}</span>}
+          </Button>
+          <Button variant={filter === "approved" ? "default" : "outline"} size="sm" onClick={() => setFilter("approved")}>
+            Approved
+            {counts.approved > 0 && <span className="ml-1.5 rounded-full bg-background/20 px-1.5 py-0.5 text-[10px]">{counts.approved}</span>}
+          </Button>
+          <Button variant={filter === "rejected" ? "default" : "outline"} size="sm" onClick={() => setFilter("rejected")}>
+            Rejected
+            {counts.rejected > 0 && <span className="ml-1.5 rounded-full bg-background/20 px-1.5 py-0.5 text-[10px]">{counts.rejected}</span>}
+          </Button>
+          <Button variant={filter === "all" ? "default" : "outline"} size="sm" onClick={() => setFilter("all")}>
+            All
+            {counts.all > 0 && <span className="ml-1.5 rounded-full bg-background/20 px-1.5 py-0.5 text-[10px]">{counts.all}</span>}
+          </Button>
+        </div>
+      </div>
+
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <ChartCard title="Pending" subtitle="Needs action or revision">
+          <div className="text-4xl font-semibold">{counts.pending}</div>
+        </ChartCard>
+        <ChartCard title="Approved" subtitle="Resolved successfully">
+          <div className="text-4xl font-semibold">{counts.approved}</div>
+        </ChartCard>
+        <ChartCard title="Rejected" subtitle="Declined approvals">
+          <div className="text-4xl font-semibold">{counts.rejected}</div>
+        </ChartCard>
+        <ChartCard title="Total" subtitle="Approvals linked to this agent">
+          <div className="text-4xl font-semibold">{counts.all}</div>
+        </ChartCard>
+      </div>
+
+      {filteredApprovals.length === 0 ? (
+        <div className="rounded-lg border border-border bg-background/60 px-4 py-10 text-center text-sm text-muted-foreground">
+          No approvals in this workflow view.
+        </div>
+      ) : (
+        <div className="grid gap-3">
+          {filteredApprovals.map((approval) => (
+            <ApprovalCard
+              key={approval.id}
+              approval={approval}
+              requesterAgent={
+                approval.requestedByAgentId
+                  ? agents.find((candidate) => candidate.id === approval.requestedByAgentId) ?? null
+                  : null
+              }
+              onApprove={() => onApprove(approval.id)}
+              onReject={() => onReject(approval.id)}
+              detailLink={`/approvals/${approval.id}`}
+              isPending={isMutating}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
