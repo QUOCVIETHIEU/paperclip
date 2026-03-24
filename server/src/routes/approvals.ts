@@ -85,6 +85,20 @@ function requestedForCandidates(value: unknown) {
     .filter((token) => token.length > 0);
 }
 
+function extractProjectSubjectFromTitle(title: string | null | undefined) {
+  if (!title) return null;
+  const match = title.match(/cho dự án\s+(.+)$/i);
+  return match?.[1]?.trim() || null;
+}
+
+function buildTechLeadHandoffTitle(sourceTitle: string | null | undefined) {
+  const subject = extractProjectSubjectFromTitle(sourceTitle);
+  if (subject) {
+    return `Xây dựng technical solution và kế hoạch kỹ thuật cho dự án ${subject}`;
+  }
+  return "Xây dựng technical solution và kế hoạch kỹ thuật từ Requirement Package đã approved";
+}
+
 export function approvalRoutes(db: Db) {
   const router = Router();
   const svc = approvalService(db);
@@ -201,6 +215,180 @@ export function approvalRoutes(db: Db) {
     };
   }
 
+  async function resolveTechLeadAgent(companyId: string, preferredManagerId: string | null) {
+    const availableAgents = (await agentsSvc.list(companyId)).filter((agent) => agent.status !== "terminated");
+    const scored = availableAgents
+      .map((agent) => {
+        let score = 0;
+        if (preferredManagerId && agent.reportsTo === preferredManagerId) score += 100;
+
+        const title = normalizeComparableAgentName(agent.title);
+        const name = normalizeComparableAgentName(agent.name);
+        const capabilities = normalizeComparableAgentName(agent.capabilities);
+
+        if (title.includes("tech lead") || title.includes("technical lead")) score += 80;
+        if (name.includes("tech lead") || name.includes("technical lead")) score += 70;
+        if (capabilities.includes("technical solution")) score += 20;
+        if (capabilities.includes("module breakdown")) score += 10;
+
+        return { agent, score };
+      })
+      .filter((entry) => entry.score > 0)
+      .sort((left, right) => right.score - left.score);
+
+    return scored[0]?.agent ?? null;
+  }
+
+  async function automateRequirementApprovalHandoff(input: {
+    approval: Awaited<ReturnType<typeof svc.getById>>;
+    linkedIssues: Awaited<ReturnType<typeof issueApprovalsSvc.listIssuesForApproval>>;
+    resumeIssue: Awaited<ReturnType<typeof issuesSvc.getById>>;
+    coordinatorAgentId: string | null;
+    requestedByUserId: string;
+  }) {
+    const { approval, linkedIssues, resumeIssue, coordinatorAgentId, requestedByUserId } = input;
+    if (approval.type !== "approve_requirement_package" || !resumeIssue) {
+      return { handled: false as const, techLeadIssueId: null as string | null, wakeRunId: null as string | null };
+    }
+
+    const requirementIssue = linkedIssues[0] ? await issuesSvc.getById(linkedIssues[0].id) : null;
+    const techLeadAgent = await resolveTechLeadAgent(approval.companyId, coordinatorAgentId);
+    if (!techLeadAgent) {
+      return { handled: false as const, techLeadIssueId: null as string | null, wakeRunId: null as string | null };
+    }
+
+    const siblingIssues = await issuesSvc.list(approval.companyId, { parentId: resumeIssue.id });
+    const existingTechLeadIssue =
+      siblingIssues.find(
+        (issue) =>
+          issue.assigneeAgentId === techLeadAgent.id &&
+          issue.status !== "done" &&
+          issue.status !== "cancelled",
+      ) ?? null;
+
+    const latestRequirementComment = requirementIssue
+      ? await issuesSvc.listComments(requirementIssue.id, { order: "desc", limit: 1 }).then((rows) => rows[0] ?? null)
+      : null;
+    const requirementSummary = summarizeCommentBody(latestRequirementComment?.body, 400);
+
+    const techLeadIssue =
+      existingTechLeadIssue ??
+      (await issuesSvc.create(approval.companyId, {
+        projectId: resumeIssue.projectId,
+        projectWorkspaceId: resumeIssue.projectWorkspaceId,
+        goalId: resumeIssue.goalId,
+        parentId: resumeIssue.id,
+        title: buildTechLeadHandoffTitle(requirementIssue?.title ?? resumeIssue.title),
+        description: [
+          "Requirement Package đã được approve và sẵn sàng bàn giao sang TECH LEAD.",
+          requirementIssue
+            ? `Nguồn requirement: ${requirementIssue.identifier ?? requirementIssue.id} - ${requirementIssue.title}`
+            : null,
+          `Issue điều phối: ${resumeIssue.identifier ?? resumeIssue.id} - ${resumeIssue.title}`,
+          requirementSummary ? `Tóm tắt đầu ra BA: ${requirementSummary}` : null,
+          "",
+          "Mục tiêu bước tiếp theo:",
+          "- Xây dựng Technical Solution",
+          "- Xác định Module Breakdown",
+          "- Làm rõ Technical Dependencies",
+          "- Xác định Technical Risks",
+          "- Đề xuất Dev Approach",
+        ]
+          .filter(Boolean)
+          .join("\n"),
+        status: "todo",
+        priority: resumeIssue.priority,
+        assigneeAgentId: techLeadAgent.id,
+        requestDepth: resumeIssue.requestDepth + 1,
+        createdByAgentId: coordinatorAgentId,
+      }));
+
+    if (!existingTechLeadIssue) {
+      await logActivity(db, {
+        companyId: approval.companyId,
+        actorType: "user",
+        actorId: requestedByUserId,
+        agentId: coordinatorAgentId,
+        action: "issue.created",
+        entityType: "issue",
+        entityId: techLeadIssue.id,
+        details: {
+          identifier: techLeadIssue.identifier,
+          title: techLeadIssue.title,
+          sourceApprovalId: approval.id,
+        },
+      });
+    }
+
+    const coordinatorComment = await issuesSvc.addComment(
+      resumeIssue.id,
+      [
+        `Requirement Package đã được approve qua gate ${approval.id.slice(0, 8)}.`,
+        `Đã bàn giao tiếp sang TECH LEAD: ${techLeadIssue.identifier ?? techLeadIssue.id} - ${techLeadIssue.title}.`,
+      ].join("\n"),
+      {},
+    );
+    await issuesSvc.update(resumeIssue.id, { status: "done" });
+
+    const techLeadComment = await issuesSvc.addComment(
+      techLeadIssue.id,
+      [
+        "Requirement Package đã được PM review và approve.",
+        requirementIssue
+          ? `Nguồn requirement: ${requirementIssue.identifier ?? requirementIssue.id} - ${requirementIssue.title}`
+          : null,
+        `Hãy bắt đầu bước Solutioning & Technical Planning từ issue điều phối ${resumeIssue.identifier ?? resumeIssue.id}.`,
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      {},
+    );
+
+    const wakeRun = await heartbeat.wakeup(techLeadAgent.id, {
+      source: "automation",
+      triggerDetail: "system",
+      reason: "requirement_approval_handoff",
+      payload: {
+        issueId: techLeadIssue.id,
+        mutation: "approval_handoff",
+        approvalId: approval.id,
+        commentId: techLeadComment.id,
+      },
+      requestedByActorType: "user",
+      requestedByActorId: requestedByUserId,
+      contextSnapshot: {
+        source: "approval.approved.requirement_handoff",
+        approvalId: approval.id,
+        issueId: techLeadIssue.id,
+        taskId: techLeadIssue.id,
+        wakeReason: "requirement_approval_handoff",
+        wakeCommentId: techLeadComment.id,
+      },
+    });
+
+    await logActivity(db, {
+      companyId: approval.companyId,
+      actorType: "user",
+      actorId: requestedByUserId,
+      action: "approval.requirement_handoff_created",
+      entityType: "approval",
+      entityId: approval.id,
+      details: {
+        coordinatorIssueId: resumeIssue.id,
+        coordinatorCommentId: coordinatorComment.id,
+        techLeadAgentId: techLeadAgent.id,
+        techLeadIssueId: techLeadIssue.id,
+        wakeRunId: wakeRun?.id ?? null,
+      },
+    });
+
+    return {
+      handled: true as const,
+      techLeadIssueId: techLeadIssue.id,
+      wakeRunId: wakeRun?.id ?? null,
+    };
+  }
+
   router.get("/companies/:companyId/approvals", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
@@ -300,10 +488,18 @@ export function approvalRoutes(db: Db) {
       const linkedIssueIds = linkedIssues.map((issue) => issue.id);
       const { resumeIssue, wakeAgentId } = await resolveApprovalResumeContext(approval, linkedIssues);
       const wakeIssueId = resumeIssue?.id ?? linkedIssueIds[0] ?? null;
+      const requirementHandoff = await automateRequirementApprovalHandoff({
+        approval,
+        linkedIssues,
+        resumeIssue,
+        coordinatorAgentId: wakeAgentId,
+        requestedByUserId: req.actor.userId ?? "board",
+      });
 
       if (
         resumeIssue &&
         wakeAgentId &&
+        !requirementHandoff.handled &&
         resumeIssue.status !== "done" &&
         resumeIssue.status !== "cancelled" &&
         (resumeIssue.assigneeAgentId !== wakeAgentId || resumeIssue.assigneeUserId !== null)
@@ -326,10 +522,11 @@ export function approvalRoutes(db: Db) {
           type: approval.type,
           requestedByAgentId: approval.requestedByAgentId,
           linkedIssueIds,
+          techLeadIssueId: requirementHandoff.techLeadIssueId,
         },
       });
 
-      if (wakeAgentId) {
+      if (wakeAgentId && !requirementHandoff.handled) {
         try {
           const wakeRun = await heartbeat.wakeup(wakeAgentId, {
             source: "automation",

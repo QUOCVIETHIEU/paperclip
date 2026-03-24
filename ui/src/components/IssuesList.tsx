@@ -7,7 +7,7 @@ import { authApi } from "../api/auth";
 import { queryKeys } from "../lib/queryKeys";
 import { formatAssigneeUserLabel } from "../lib/assignees";
 import { groupBy } from "../lib/groupBy";
-import { formatDate, cn } from "../lib/utils";
+import { formatDateTime, cn } from "../lib/utils";
 import { timeAgo } from "../lib/timeAgo";
 import { StatusIcon } from "./StatusIcon";
 import { PriorityIcon } from "./PriorityIcon";
@@ -735,7 +735,7 @@ export function IssuesList({
                         <div className="min-w-0 justify-self-start truncate text-xs text-left">{createdByLabel(issue)}</div>
                         <div className="min-w-0 justify-self-start truncate text-xs text-left">{assigneeLabel(issue)}</div>
                         <div className="min-w-0 justify-self-center truncate text-xs text-center">{timeAgo(issue.updatedAt)}</div>
-                        <div className="min-w-0 justify-self-start truncate text-xs text-left">{formatDate(issue.createdAt)}</div>
+                        <div className="min-w-0 justify-self-start truncate text-xs text-left">{formatDateTime(issue.createdAt)}</div>
                       </div>
                     </>
                   )}

@@ -786,6 +786,7 @@ function ProjectIssuesList({
   companyId: string;
 }) {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
 
   const { data: agents } = useQuery({
     queryKey: queryKeys.agents.list(companyId),
@@ -938,8 +939,17 @@ function ProjectIssuesList({
                     </div>
                   </div>
 
-                  {actionable ? (
-                    <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-8 px-3"
+                      onClick={() => navigate(`/issues/${issueId}`)}
+                    >
+                      View Issue
+                    </Button>
+                    {actionable ? (
+                      <>
                       <Button
                         size="sm"
                         className="h-8 bg-green-700 px-3 text-white hover:bg-green-600"
@@ -957,8 +967,9 @@ function ProjectIssuesList({
                       >
                         Reject
                       </Button>
-                    </div>
-                  ) : null}
+                      </>
+                    ) : null}
+                  </div>
                 </div>
               );
             })}
