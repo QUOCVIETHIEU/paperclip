@@ -26,10 +26,20 @@ import { projectRouteRef, cn, formatDate } from "../lib/utils";
 import { timeAgo } from "../lib/timeAgo";
 import { Tabs } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { PluginLauncherOutlet } from "@/plugins/launchers";
 import { PluginSlotMount, PluginSlotOutlet, usePluginSlots } from "@/plugins/slots";
-import { Activity, AlertTriangle, CheckCircle2, ShieldCheck, Trash2 } from "lucide-react";
+import { Activity, AlertTriangle, CheckCircle2, ChevronDown, ShieldCheck, Trash2 } from "lucide-react";
 import type { Approval } from "@paperclipai/shared";
+import { MarkdownBody } from "../components/MarkdownBody";
 
 /* ── Top-level tab types ── */
 
@@ -787,6 +797,9 @@ function ProjectIssuesList({
 }) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const [previewIssueId, setPreviewIssueId] = useState<string | null>(null);
+  const [previewApprovalId, setPreviewApprovalId] = useState<string | null>(null);
+  const [showSourceContext, setShowSourceContext] = useState(false);
 
   const { data: agents } = useQuery({
     queryKey: queryKeys.agents.list(companyId),
@@ -813,6 +826,24 @@ function ProjectIssuesList({
     queryKey: queryKeys.issues.listByProject(companyId, projectId),
     queryFn: () => issuesApi.list(companyId, { projectId }),
     enabled: !!companyId,
+  });
+
+  const { data: previewIssue, isLoading: isPreviewIssueLoading } = useQuery({
+    queryKey: previewIssueId ? queryKeys.issues.detail(previewIssueId) : ["issue-preview", "idle"],
+    queryFn: () => issuesApi.get(previewIssueId!),
+    enabled: !!previewIssueId,
+  });
+
+  const { data: previewParentIssue, isLoading: isPreviewParentIssueLoading } = useQuery({
+    queryKey: previewIssue?.parentId ? queryKeys.issues.detail(previewIssue.parentId) : ["issue-preview-parent", "idle"],
+    queryFn: () => issuesApi.get(previewIssue!.parentId!),
+    enabled: !!previewIssue?.parentId,
+  });
+
+  const { data: previewComments, isLoading: isPreviewCommentsLoading } = useQuery({
+    queryKey: previewIssueId ? queryKeys.issues.comments(previewIssueId) : ["issue-preview-comments", "idle"],
+    queryFn: () => issuesApi.listComments(previewIssueId!),
+    enabled: !!previewIssueId,
   });
 
   const issueApprovalQueries = useQueries({
@@ -864,6 +895,19 @@ function ProjectIssuesList({
     [agents],
   );
 
+  const previewApprovalRow = useMemo(() => {
+    if (!previewApprovalId) return null;
+    return projectApprovals.find((row) => row.approval.id === previewApprovalId) ?? null;
+  }, [previewApprovalId, projectApprovals]);
+
+  const latestMeaningfulComments = useMemo(() => {
+    return (previewComments ?? [])
+      .filter((comment) => comment.body.trim().length > 0)
+      .slice()
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(0, 3);
+  }, [previewComments]);
+
   const updateIssue = useMutation({
     mutationFn: ({ id, data }: { id: string; data: Record<string, unknown> }) =>
       issuesApi.update(id, data),
@@ -900,6 +944,7 @@ function ProjectIssuesList({
   return (
     <div className="space-y-3">
       {projectApprovals.length > 0 ? (
+        <>
         <div className="rounded-xl border border-border/70 bg-card">
           <div className="flex items-center justify-between border-b border-border px-4 py-3">
             <div>
@@ -944,7 +989,10 @@ function ProjectIssuesList({
                       variant="outline"
                       size="sm"
                       className="h-8 px-3"
-                      onClick={() => navigate(`/issues/${issueId}`)}
+                      onClick={() => {
+                        setPreviewIssueId(issueId);
+                        setPreviewApprovalId(approval.id);
+                      }}
                     >
                       View Issue
                     </Button>
@@ -975,6 +1023,215 @@ function ProjectIssuesList({
             })}
           </div>
         </div>
+        <Dialog
+          open={Boolean(previewIssueId)}
+          onOpenChange={(open) => {
+            if (!open) {
+              setPreviewIssueId(null);
+              setPreviewApprovalId(null);
+              setShowSourceContext(false);
+            }
+          }}
+        >
+          <DialogContent className="!w-[min(67vw,72rem)] !max-w-[min(67vw,72rem)] sm:!max-w-[min(67vw,72rem)]">
+            <DialogHeader>
+              <DialogTitle>{previewIssue?.title ?? "Issue Preview"}</DialogTitle>
+              <DialogDescription>
+                Xem nhanh nội dung issue để quyết định approval mà không rời khỏi trang dự án.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="max-h-[70vh] space-y-5 overflow-y-auto pr-2">
+              <div className="grid gap-3 rounded-lg border border-border/70 bg-muted/20 p-4 md:grid-cols-5">
+                <div>
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Issue</div>
+                  <div className="mt-1 text-sm font-medium">{previewIssue?.identifier ?? "—"}</div>
+                </div>
+                <div>
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">From</div>
+                  <div className="mt-1 text-sm font-medium">
+                    {previewIssue
+                      ? actorLabel(previewIssue.createdByAgentId, previewIssue.createdByUserId, agentNameById)
+                      : "—"}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">To</div>
+                  <div className="mt-1 text-sm font-medium">
+                    {previewIssue
+                      ? actorLabel(
+                          resolveIssueRecipientAgentId(previewIssue),
+                          resolveIssueRecipientUserId(previewIssue),
+                          agentNameById,
+                        )
+                      : "—"}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Status</div>
+                  <div className="mt-1 text-sm font-medium">{previewIssue?.status ?? "—"}</div>
+                </div>
+                <div>
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Updated</div>
+                  <div className="mt-1 text-sm font-medium">
+                    {previewIssue ? `${formatDate(previewIssue.updatedAt)} • ${timeAgo(previewIssue.updatedAt)}` : "—"}
+                  </div>
+                </div>
+              </div>
+
+              <section className="space-y-2">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm font-semibold">Kết quả BA gửi để PM review</div>
+                  {previewIssueId ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => navigate(`/issues/${previewIssueId}`)}
+                    >
+                      Open Full Issue
+                    </Button>
+                  ) : null}
+                </div>
+                <div className="space-y-3">
+                  {isPreviewCommentsLoading ? (
+                    <div className="rounded-lg border border-border/70 bg-background p-4 text-sm text-muted-foreground">
+                      Đang tải comments...
+                    </div>
+                  ) : latestMeaningfulComments.length > 0 ? (
+                    latestMeaningfulComments.map((comment) => (
+                      <div key={comment.id} className="rounded-lg border border-border/70 bg-background p-4">
+                        <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                          <span>
+                            {comment.authorAgentId
+                              ? (agentNameById.get(comment.authorAgentId) ?? "Agent")
+                              : comment.authorUserId
+                                ? "Board"
+                                : "Unknown"}
+                          </span>
+                          <span>{formatDate(comment.createdAt)}</span>
+                          <span>{timeAgo(comment.createdAt)}</span>
+                        </div>
+                        <MarkdownBody className="[&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+                          {comment.body}
+                        </MarkdownBody>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="rounded-lg border border-border/70 bg-background p-4 text-sm text-muted-foreground">
+                      Chưa có comment nào để preview.
+                    </div>
+                  )}
+                </div>
+              </section>
+              <Collapsible open={showSourceContext} onOpenChange={setShowSourceContext}>
+                <div className="rounded-lg border border-border/70 bg-muted/20">
+                  <CollapsibleTrigger className="flex w-full items-center justify-between px-4 py-3 text-left">
+                    <div>
+                      <div className="text-sm font-semibold">Yêu cầu gốc từ PM</div>
+                      <div className="text-xs text-muted-foreground">
+                        Mở rộng khi cần xem lại bối cảnh giao việc ban đầu.
+                      </div>
+                    </div>
+                    <ChevronDown
+                      className={cn(
+                        "h-4 w-4 text-muted-foreground transition-transform",
+                        showSourceContext && "rotate-180",
+                      )}
+                    />
+                  </CollapsibleTrigger>
+                  <CollapsibleContent>
+                    <div className="border-t border-border/70 bg-background p-4">
+                      {isPreviewParentIssueLoading ? (
+                        <p className="text-sm text-muted-foreground">Đang tải nội dung issue...</p>
+                      ) : previewParentIssue ? (
+                        <div className="space-y-3">
+                          <div>
+                            <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+                              Issue PM
+                            </div>
+                            <div className="mt-1 text-sm font-medium">
+                              {previewParentIssue.identifier ?? "—"} · {previewParentIssue.title}
+                            </div>
+                          </div>
+                          {previewParentIssue.description?.trim() ? (
+                            <MarkdownBody className="[&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+                              {previewParentIssue.description}
+                            </MarkdownBody>
+                          ) : (
+                            <p className="text-sm text-muted-foreground">Issue PM này chưa có phần mô tả.</p>
+                          )}
+                        </div>
+                      ) : isPreviewIssueLoading ? (
+                        <p className="text-sm text-muted-foreground">Đang tải nội dung issue...</p>
+                      ) : previewIssue?.description?.trim() ? (
+                        <MarkdownBody className="[&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+                          {previewIssue.description}
+                        </MarkdownBody>
+                      ) : (
+                        <p className="text-sm text-muted-foreground">
+                          Chưa tìm thấy issue gốc của PM hoặc issue đó chưa có phần mô tả.
+                        </p>
+                      )}
+                    </div>
+                  </CollapsibleContent>
+                </div>
+              </Collapsible>
+            </div>
+            <DialogFooter className="border-t border-border/70 pt-4">
+              <div className="flex w-full items-center justify-between gap-3">
+                <div className="text-xs text-muted-foreground">
+                  {previewApprovalRow ? (
+                    <>
+                      {approvalTypeLabel(previewApprovalRow.approval.type)} · {approvalStatusLabel(previewApprovalRow.approval.status)}
+                    </>
+                  ) : (
+                    "Review issue content before taking approval action."
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  {previewApprovalRow &&
+                  (previewApprovalRow.approval.status === "pending" ||
+                    previewApprovalRow.approval.status === "revision_requested") ? (
+                    <>
+                      <Button
+                        size="sm"
+                        className="h-8 bg-green-700 px-3 text-white hover:bg-green-600"
+                        onClick={() =>
+                          approveApproval.mutate(previewApprovalRow.approval.id, {
+                            onSuccess: () => {
+                              setPreviewIssueId(null);
+                              setPreviewApprovalId(null);
+                            },
+                          })
+                        }
+                        disabled={approveApproval.isPending || rejectApproval.isPending}
+                      >
+                        Approve
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        className="h-8 px-3"
+                        onClick={() =>
+                          rejectApproval.mutate(previewApprovalRow.approval.id, {
+                            onSuccess: () => {
+                              setPreviewIssueId(null);
+                              setPreviewApprovalId(null);
+                            },
+                          })
+                        }
+                        disabled={approveApproval.isPending || rejectApproval.isPending}
+                      >
+                        Reject
+                      </Button>
+                    </>
+                  ) : null}
+                </div>
+              </div>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+        </>
       ) : null}
 
       <IssuesList
