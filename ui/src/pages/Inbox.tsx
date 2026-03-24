@@ -38,6 +38,7 @@ import {
   XCircle,
   X,
   RotateCcw,
+  Trash2,
 } from "lucide-react";
 import { Identity } from "../components/Identity";
 import { PageTabBar } from "../components/PageTabBar";

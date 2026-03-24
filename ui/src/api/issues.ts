@@ -45,6 +45,22 @@ export const issuesApi = {
   markRead: (id: string) => api.post<{ id: string; lastReadAt: Date }>(`/issues/${id}/read`, {}),
   create: (companyId: string, data: Record<string, unknown>) =>
     api.post<Issue>(`/companies/${companyId}/issues`, data),
+  cleanAll: (companyId: string) =>
+    api.delete<{
+      ok: true;
+      removedIssueCount: number;
+      removedApprovalCount: number;
+      removedCommentCount: number;
+      removedReadStateCount: number;
+    }>(`/companies/${companyId}/issues`),
+  cleanProject: (companyId: string, projectId: string) =>
+    api.delete<{
+      ok: true;
+      removedIssueCount: number;
+      removedApprovalCount: number;
+      removedCommentCount: number;
+      removedReadStateCount: number;
+    }>(`/companies/${companyId}/projects/${projectId}/issues`),
   update: (id: string, data: Record<string, unknown>) => api.patch<Issue>(`/issues/${id}`, data),
   remove: (id: string) => api.delete<Issue>(`/issues/${id}`),
   checkout: (id: string, agentId: string) =>

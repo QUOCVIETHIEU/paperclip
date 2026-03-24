@@ -6,6 +6,7 @@ import { budgetsApi } from "../api/budgets";
 import { projectsApi } from "../api/projects";
 import { issuesApi } from "../api/issues";
 import { agentsApi } from "../api/agents";
+import { approvalsApi } from "../api/approvals";
 import { heartbeatsApi } from "../api/heartbeats";
 import { assetsApi } from "../api/assets";
 import { usePanel } from "../context/PanelContext";
@@ -24,9 +25,11 @@ import { PageTabBar } from "../components/PageTabBar";
 import { projectRouteRef, cn, formatDate } from "../lib/utils";
 import { timeAgo } from "../lib/timeAgo";
 import { Tabs } from "@/components/ui/tabs";
+import { Button } from "@/components/ui/button";
 import { PluginLauncherOutlet } from "@/plugins/launchers";
 import { PluginSlotMount, PluginSlotOutlet, usePluginSlots } from "@/plugins/slots";
-import { Activity, AlertTriangle, CheckCircle2, ShieldCheck } from "lucide-react";
+import { Activity, AlertTriangle, CheckCircle2, ShieldCheck, Trash2 } from "lucide-react";
+import type { Approval } from "@paperclipai/shared";
 
 /* ── Top-level tab types ── */
 
@@ -122,6 +125,18 @@ function approvalTypeLabel(type: string) {
   return type.replace(/_/g, " ");
 }
 
+function approvalStatusLabel(status: Approval["status"]) {
+  return status.replaceAll("_", " ");
+}
+
+function approvalStatusBadgeClass(status: Approval["status"]) {
+  if (status === "approved") return "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
+  if (status === "pending") return "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300";
+  if (status === "revision_requested") return "border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-700 dark:text-fuchsia-300";
+  if (status === "rejected") return "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300";
+  return "border-border bg-muted text-muted-foreground";
+}
+
 function gateApproverLabel(stageKey: TimelineStageDef["key"]) {
   if (stageKey === "requirement") return "PM";
   if (stageKey === "design") return "PM + TECH LEAD";
@@ -170,14 +185,14 @@ function buildWorkflowChain(issue: {
 
 type TimelineStageDef = {
   key:
-    | "intake"
-    | "requirement"
-    | "solutioning"
-    | "design"
-    | "development"
-    | "qa"
-    | "uat"
-    | "handover";
+  | "intake"
+  | "requirement"
+  | "solutioning"
+  | "design"
+  | "development"
+  | "qa"
+  | "uat"
+  | "handover";
   title: string;
   owner: string;
   gate?: string | null;
@@ -199,7 +214,12 @@ function inferTimelineStageKey(
   assigneeName: string | null,
 ): TimelineStageDef["key"] | null {
   const role = assigneeName?.toUpperCase() ?? "";
-  const text = `${issue.title} ${issue.description ?? ""}`.toLowerCase();
+  const titleText = issue.title.toLowerCase();
+  const detailText = `${issue.title}\n${issue.description ?? ""}`
+    .split(/\n+/)
+    .slice(0, 12)
+    .join(" ")
+    .toLowerCase();
 
   if (role.includes("CTO")) return "intake";
   if (role.includes("BA")) return "requirement";
@@ -208,15 +228,19 @@ function inferTimelineStageKey(
   if (role.includes("SD")) return "handover";
   if (role.includes("FE") || role.includes("BE") || role.includes("INTEGRATION") || role.includes("DEVOPS")) return "development";
   if (role.includes("TECH LEAD")) {
-    if (/(build|develop|implementation|module|integration|deploy|security|fix)/.test(text)) return "development";
+    if (/(build|develop|implementation|module|integration|deploy|security|fix)/.test(titleText)) return "development";
+    if (/(build|develop|implementation|module|integration|deploy|security|fix)/.test(detailText)) return "development";
     return "solutioning";
   }
   if (role.includes("PM")) {
-    if (/(hypercare|handover|service desk|takeover)/.test(text)) return "handover";
-    if (/(uat|go-live|golive|go live|release readiness)/.test(text)) return "uat";
+    if (/(hypercare|handover|service desk|takeover)/.test(titleText)) return "handover";
+    if (/(uat|go-live|golive|go live|release readiness)/.test(titleText)) return "uat";
+    if (/(requirement|yêu cầu|yeu cau|scope|business|actor|user flow|acceptance)/.test(titleText)) return "requirement";
+    if (/(hypercare|handover|service desk|takeover)/.test(detailText)) return "handover";
+    if (/(uat|go-live|golive|go live|release readiness)/.test(detailText) && !/(requirement|yêu cầu|yeu cau|scope|business|actor|user flow|acceptance)/.test(titleText)) return "uat";
     return "requirement";
   }
-  return issue.status === "done" ? "handover" : null;
+  return null;
 }
 
 function timelineStateBadgeClass(state: "completed" | "in_progress" | "pending_approval" | "operator_action" | "blocked" | "upcoming") {
@@ -424,22 +448,7 @@ function OverviewContent({
       stageMap.get(stageKey)?.pendingApprovals.push(item);
     }
 
-    const startedIndexes = DELIVERY_TIMELINE
-      .map((stage, index) => ((stageMap.get(stage.key)?.issues.length ?? 0) > 0 ? index : -1))
-      .filter((index) => index >= 0);
-    const furthestStartedIndex = startedIndexes.length > 0 ? Math.max(...startedIndexes) : -1;
-    const earliestPendingIndex = DELIVERY_TIMELINE.findIndex((stage) => (stageMap.get(stage.key)?.pendingApprovals.length ?? 0) > 0);
-    const earliestBlockedIndex = DELIVERY_TIMELINE.findIndex((stage) =>
-      (stageMap.get(stage.key)?.issues ?? []).some((issue) => issue.status === "blocked"),
-    );
-    const focusIndex =
-      earliestPendingIndex >= 0
-        ? earliestPendingIndex
-        : earliestBlockedIndex >= 0
-          ? earliestBlockedIndex
-          : furthestStartedIndex;
-
-    return DELIVERY_TIMELINE.map((stage, index) => {
+    const buckets = DELIVERY_TIMELINE.map((stage) => {
       const bucket = stageMap.get(stage.key)!;
       const openStageIssues = bucket.issues.filter((issue) => !["done", "cancelled"].includes(issue.status));
       const latestIssue = [...bucket.issues].sort(
@@ -449,7 +458,6 @@ function OverviewContent({
         ? actorLabel(resolveIssueRecipientAgentId(latestIssue), resolveIssueRecipientUserId(latestIssue), agentNameById)
         : null;
       const pending = bucket.pendingApprovals[0] ?? null;
-
       const waitingForOperatorApprovalRequest =
         Boolean(stage.gate) &&
         !pending &&
@@ -462,18 +470,42 @@ function OverviewContent({
             Boolean(issue.lastAssignedAgentId ?? issue.lastAssignedUserId),
         );
 
+      return {
+        stage,
+        bucket,
+        openStageIssues,
+        latestIssue,
+        latestAssignee,
+        pending,
+        waitingForOperatorApprovalRequest,
+        hasBlocked: bucket.issues.some((issue) => issue.status === "blocked"),
+        hasActivity: bucket.issues.length > 0 || bucket.pendingApprovals.length > 0,
+      };
+    });
+
+    const currentIndex = buckets.reduce((acc, entry, index) => {
+      if (entry.pending) return index;
+      if (entry.waitingForOperatorApprovalRequest) return index;
+      if (entry.hasBlocked) return index;
+      if (entry.openStageIssues.length > 0) return index;
+      return acc;
+    }, -1);
+
+    const lastActivityIndex = buckets.reduce((acc, entry, index) => (entry.hasActivity ? index : acc), -1);
+
+    return buckets.map(({ stage, bucket, openStageIssues, latestIssue, latestAssignee, pending, waitingForOperatorApprovalRequest, hasBlocked }, index) => {
       let state: "completed" | "in_progress" | "pending_approval" | "operator_action" | "blocked" | "upcoming" = "upcoming";
-      if (pending) {
+      if (index === currentIndex && pending) {
         state = "pending_approval";
-      } else if (waitingForOperatorApprovalRequest) {
+      } else if (index === currentIndex && waitingForOperatorApprovalRequest) {
         state = "operator_action";
-      } else if (bucket.issues.some((issue) => issue.status === "blocked")) {
+      } else if (index === currentIndex && hasBlocked) {
         state = "blocked";
-      } else if (index < focusIndex && focusIndex >= 0) {
-        state = "completed";
-      } else if (index === focusIndex && focusIndex >= 0 && (openStageIssues.length > 0 || bucket.issues.length > 0)) {
+      } else if (index === currentIndex && (openStageIssues.length > 0 || bucket.issues.length > 0)) {
         state = "in_progress";
-      } else if (furthestStartedIndex >= index && bucket.issues.length > 0 && openStageIssues.length === 0) {
+      } else if (currentIndex >= 0 && index < currentIndex) {
+        state = "completed";
+      } else if (currentIndex === -1 && lastActivityIndex >= 0 && index <= lastActivityIndex) {
         state = "completed";
       }
 
@@ -729,11 +761,10 @@ function ColorPicker({
                   onSelect(color);
                   setOpen(false);
                 }}
-                className={`h-6 w-6 rounded-md cursor-pointer transition-[transform,box-shadow] duration-150 hover:scale-110 ${
-                  color === currentColor
+                className={`h-6 w-6 rounded-md cursor-pointer transition-[transform,box-shadow] duration-150 hover:scale-110 ${color === currentColor
                     ? "ring-2 ring-foreground ring-offset-1 ring-offset-background"
                     : "hover:ring-2 hover:ring-foreground/30"
-                }`}
+                  }`}
                 style={{ backgroundColor: color }}
                 aria-label={`Select color ${color}`}
               />
@@ -747,7 +778,13 @@ function ColorPicker({
 
 /* ── List (issues) tab content ── */
 
-function ProjectIssuesList({ projectId, companyId }: { projectId: string; companyId: string }) {
+function ProjectIssuesList({
+  projectId,
+  companyId,
+}: {
+  projectId: string;
+  companyId: string;
+}) {
   const queryClient = useQueryClient();
 
   const { data: agents } = useQuery({
@@ -777,6 +814,55 @@ function ProjectIssuesList({ projectId, companyId }: { projectId: string; compan
     enabled: !!companyId,
   });
 
+  const issueApprovalQueries = useQueries({
+    queries: (issues ?? []).map((issue) => ({
+      queryKey: queryKeys.issues.approvals(issue.id),
+      queryFn: () => issuesApi.listApprovals(issue.id),
+      enabled: !!companyId,
+    })),
+  });
+
+  const projectApprovals = useMemo(() => {
+    const rows: Array<{ issueId: string; issueTitle: string; approval: Approval }> = [];
+    for (let index = 0; index < (issues ?? []).length; index += 1) {
+      const issue = issues?.[index];
+      if (!issue) continue;
+      for (const approval of issueApprovalQueries[index]?.data ?? []) {
+        rows.push({
+          issueId: issue.id,
+          issueTitle: issue.title,
+          approval,
+        });
+      }
+    }
+
+    const seen = new Set<string>();
+    return rows
+      .filter((row) => {
+        if (seen.has(row.approval.id)) return false;
+        seen.add(row.approval.id);
+        return true;
+      })
+      .sort((a, b) => {
+        const statusRank = (status: Approval["status"]) => {
+          if (status === "pending") return 0;
+          if (status === "revision_requested") return 1;
+          if (status === "rejected") return 2;
+          if (status === "approved") return 3;
+          return 4;
+        };
+        return (
+          statusRank(a.approval.status) - statusRank(b.approval.status) ||
+          new Date(b.approval.updatedAt).getTime() - new Date(a.approval.updatedAt).getTime()
+        );
+      });
+  }, [issueApprovalQueries, issues]);
+
+  const agentNameById = useMemo(
+    () => new Map((agents ?? []).map((agent) => [agent.id, agent.name])),
+    [agents],
+  );
+
   const updateIssue = useMutation({
     mutationFn: ({ id, data }: { id: string; data: Record<string, unknown> }) =>
       issuesApi.update(id, data),
@@ -786,17 +872,111 @@ function ProjectIssuesList({ projectId, companyId }: { projectId: string; compan
     },
   });
 
+  const approveApproval = useMutation({
+    mutationFn: (id: string) => approvalsApi.approve(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.approvals.list(companyId) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.issues.listByProject(companyId, projectId) });
+      for (const issue of issues ?? []) {
+        queryClient.invalidateQueries({ queryKey: queryKeys.issues.approvals(issue.id) });
+      }
+      queryClient.invalidateQueries({ queryKey: queryKeys.projects.detail(projectId) });
+    },
+  });
+
+  const rejectApproval = useMutation({
+    mutationFn: (id: string) => approvalsApi.reject(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.approvals.list(companyId) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.issues.listByProject(companyId, projectId) });
+      for (const issue of issues ?? []) {
+        queryClient.invalidateQueries({ queryKey: queryKeys.issues.approvals(issue.id) });
+      }
+      queryClient.invalidateQueries({ queryKey: queryKeys.projects.detail(projectId) });
+    },
+  });
+
   return (
-    <IssuesList
-      issues={issues ?? []}
-      isLoading={isLoading}
-      error={error as Error | null}
-      agents={agents}
-      liveIssueIds={liveIssueIds}
-      projectId={projectId}
-      viewStateKey={`paperclip:project-view:${projectId}`}
-      onUpdateIssue={(id, data) => updateIssue.mutate({ id, data })}
-    />
+    <div className="space-y-3">
+      {projectApprovals.length > 0 ? (
+        <div className="rounded-xl border border-border/70 bg-card">
+          <div className="flex items-center justify-between border-b border-border px-4 py-3">
+            <div>
+              <h3 className="text-sm font-semibold">Project Approvals</h3>
+              <p className="text-xs text-muted-foreground">
+                Theo dõi approvals liên kết với các issue của dự án.
+              </p>
+            </div>
+            <span className="text-xs text-muted-foreground">
+              {projectApprovals.length} approval{projectApprovals.length === 1 ? "" : "s"}
+            </span>
+          </div>
+
+          <div className="divide-y divide-border">
+            {projectApprovals.map(({ issueId, issueTitle, approval }) => {
+              const requesterName = approval.requestedByAgentId
+                ? (agentNameById.get(approval.requestedByAgentId) ?? "Agent")
+                : "Board";
+              const actionable = approval.status === "pending" || approval.status === "revision_requested";
+
+              return (
+                <div key={approval.id} className="flex flex-col gap-3 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+                  <div className="min-w-0 space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-medium">{approvalTypeLabel(approval.type)}</span>
+                      <span className={cn("inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold capitalize", approvalStatusBadgeClass(approval.status))}>
+                        {approvalStatusLabel(approval.status)}
+                      </span>
+                    </div>
+                    <p className="text-sm text-muted-foreground">
+                      Issue: <span className="text-foreground">{issueTitle}</span>
+                    </p>
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                      <span>requested by {requesterName}</span>
+                      <span>updated {timeAgo(approval.updatedAt)}</span>
+                      <span className="font-mono">{approval.id.slice(0, 8)}</span>
+                    </div>
+                  </div>
+
+                  {actionable ? (
+                    <div className="flex items-center gap-2">
+                      <Button
+                        size="sm"
+                        className="h-8 bg-green-700 px-3 text-white hover:bg-green-600"
+                        onClick={() => approveApproval.mutate(approval.id)}
+                        disabled={approveApproval.isPending || rejectApproval.isPending}
+                      >
+                        Approve
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        className="h-8 px-3"
+                        onClick={() => rejectApproval.mutate(approval.id)}
+                        disabled={approveApproval.isPending || rejectApproval.isPending}
+                      >
+                        Reject
+                      </Button>
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
+
+      <IssuesList
+        issues={issues ?? []}
+        isLoading={isLoading}
+        error={error as Error | null}
+        agents={agents}
+        liveIssueIds={liveIssueIds}
+        projectId={projectId}
+        viewStateKey={`paperclip:project-view:${projectId}`}
+        onUpdateIssue={(id, data) => updateIssue.mutate({ id, data })}
+      />
+    </div>
   );
 }
 
@@ -813,6 +993,7 @@ export function ProjectDetail() {
   const { setBreadcrumbs } = useBreadcrumbs();
   const { pushToast } = useToast();
   const queryClient = useQueryClient();
+  const isDev = import.meta.env.DEV;
   const navigate = useNavigate();
   const location = useLocation();
   const [fieldSaveStates, setFieldSaveStates] = useState<Partial<Record<ProjectConfigFieldKey, ProjectFieldSaveState>>>({});
@@ -1051,6 +1232,31 @@ export function ProjectDetail() {
     },
   });
 
+  const cleanProjectIssues = useMutation({
+    mutationFn: () => {
+      if (!resolvedCompanyId || !project?.id) {
+        throw new Error("Project context is not ready");
+      }
+      return issuesApi.cleanProject(resolvedCompanyId, project.id);
+    },
+    onSuccess: (result) => {
+      if (resolvedCompanyId && project?.id) {
+        queryClient.invalidateQueries({ queryKey: queryKeys.issues.listByProject(resolvedCompanyId, project.id) });
+        queryClient.invalidateQueries({ queryKey: queryKeys.issues.list(resolvedCompanyId) });
+        queryClient.invalidateQueries({ queryKey: queryKeys.approvals.list(resolvedCompanyId) });
+        queryClient.invalidateQueries({ queryKey: queryKeys.projects.detail(project.id) });
+        queryClient.invalidateQueries({ queryKey: queryKeys.projects.list(resolvedCompanyId) });
+      }
+      pushToast({
+        title: "Project issues cleaned",
+        body: result.removedIssueCount > 0
+          ? `Removed ${result.removedIssueCount} issues from this project.`
+          : "No project issues to remove.",
+        tone: "success",
+      });
+    },
+  });
+
   if (pluginTabFromSearch && !pluginDetailSlotsLoading && !activePluginTab) {
     return <Navigate to={`/projects/${canonicalProjectRef}/issues`} replace />;
   }
@@ -1059,7 +1265,7 @@ export function ProjectDetail() {
   if (routeProjectRef && activeTab === null) {
     let cachedTab: string | null = null;
     if (project?.id) {
-      try { cachedTab = localStorage.getItem(`paperclip:project-tab:${project.id}`); } catch {}
+      try { cachedTab = localStorage.getItem(`paperclip:project-tab:${project.id}`); } catch { }
     }
     if (cachedTab === "overview") {
       return <Navigate to={`/projects/${canonicalProjectRef}/overview`} replace />;
@@ -1083,7 +1289,7 @@ export function ProjectDetail() {
   const handleTabChange = (tab: ProjectTab) => {
     // Cache the active tab per project
     if (project?.id) {
-      try { localStorage.setItem(`paperclip:project-tab:${project.id}`, tab); } catch {}
+      try { localStorage.setItem(`paperclip:project-tab:${project.id}`, tab); } catch { }
     }
     if (isProjectPluginTab(tab)) {
       navigate(`/projects/${canonicalProjectRef}?tab=${encodeURIComponent(tab)}`);
@@ -1102,26 +1308,28 @@ export function ProjectDetail() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-start gap-3">
-        <div className="h-7 flex items-center">
-          <ColorPicker
-            currentColor={project.color ?? "#6366f1"}
-            onSelect={(color) => updateProject.mutate({ color })}
-          />
-        </div>
-        <div className="min-w-0 space-y-2">
-          <InlineEditor
-            value={project.name}
-            onSave={(name) => updateProject.mutate({ name })}
-            as="h2"
-            className="text-xl font-bold"
-          />
-          {project.pauseReason === "budget" ? (
-            <div className="inline-flex items-center gap-2 rounded-full border border-red-500/30 bg-red-500/10 px-3 py-1 text-[11px] font-medium uppercase tracking-[0.18em] text-red-200">
-              <span className="h-2 w-2 rounded-full bg-red-400" />
-              Paused by budget hard stop
-            </div>
-          ) : null}
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex items-start gap-3">
+          <div className="h-7 flex items-center">
+            <ColorPicker
+              currentColor={project.color ?? "#6366f1"}
+              onSelect={(color) => updateProject.mutate({ color })}
+            />
+          </div>
+          <div className="min-w-0 space-y-2">
+            <InlineEditor
+              value={project.name}
+              onSave={(name) => updateProject.mutate({ name })}
+              as="h2"
+              className="text-xl font-bold"
+            />
+            {project.pauseReason === "budget" ? (
+              <div className="inline-flex items-center gap-2 rounded-full border border-red-500/30 bg-red-500/10 px-3 py-1 text-[11px] font-medium uppercase tracking-[0.18em] text-red-200">
+                <span className="h-2 w-2 rounded-full bg-red-400" />
+                Paused by budget hard stop
+              </div>
+            ) : null}
+          </div>
         </div>
       </div>
 
@@ -1156,23 +1364,44 @@ export function ProjectDetail() {
         itemClassName="inline-flex"
       />
 
-      <Tabs value={activeTab ?? "list"} onValueChange={(value) => handleTabChange(value as ProjectTab)}>
-        <PageTabBar
-          items={[
-            { value: "list", label: "Issues" },
-            { value: "overview", label: "Overview" },
-            { value: "configuration", label: "Configuration" },
-            { value: "budget", label: "Budget" },
-            ...pluginTabItems.map((item) => ({
-              value: item.value,
-              label: item.label,
-            })),
-          ]}
-          align="start"
-          value={activeTab ?? "list"}
-          onValueChange={(value) => handleTabChange(value as ProjectTab)}
-        />
-      </Tabs>
+      <div className="flex items-start justify-between gap-4">
+        <Tabs value={activeTab ?? "list"} onValueChange={(value) => handleTabChange(value as ProjectTab)}>
+          <PageTabBar
+            items={[
+              { value: "list", label: "Issues" },
+              { value: "overview", label: "Overview" },
+              { value: "configuration", label: "Configuration" },
+              { value: "budget", label: "Budget" },
+              ...pluginTabItems.map((item) => ({
+                value: item.value,
+                label: item.label,
+              })),
+            ]}
+            align="start"
+            value={activeTab ?? "list"}
+            onValueChange={(value) => handleTabChange(value as ProjectTab)}
+          />
+        </Tabs>
+        {isDev && activeTab === "list" ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="mt-0.5 shrink-0 text-destructive hover:text-destructive"
+            disabled={cleanProjectIssues.isPending}
+            onClick={() => {
+              const confirmed = window.confirm(
+                "Clean all issues in this project? This also removes linked issue approvals, comments, and inbox read-state data for those project issues. Dev-only reset.",
+              );
+              if (!confirmed) return;
+              cleanProjectIssues.mutate();
+            }}
+          >
+            <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+            {cleanProjectIssues.isPending ? "Cleaning…" : "Clean Issues"}
+          </Button>
+        ) : null}
+      </div>
 
       {activeTab === "overview" && (
         <OverviewContent
@@ -1188,7 +1417,10 @@ export function ProjectDetail() {
       )}
 
       {activeTab === "list" && project?.id && resolvedCompanyId && (
-        <ProjectIssuesList projectId={project.id} companyId={resolvedCompanyId} />
+        <ProjectIssuesList
+          projectId={project.id}
+          companyId={resolvedCompanyId}
+        />
       )}
 
       {activeTab === "configuration" && (

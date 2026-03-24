@@ -481,6 +481,55 @@ export function issueRoutes(db: Db, storage: StorageService) {
     res.json(result);
   });
 
+  router.delete("/companies/:companyId/issues", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    if (req.actor.type !== "board") {
+      res.status(403).json({ error: "Only board operators can bulk clean issues." });
+      return;
+    }
+
+    const result = await svc.removeAllForCompany(companyId);
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "issue.bulk_deleted",
+      entityType: "issue",
+      entityId: companyId,
+      details: result,
+    });
+    res.json({ ok: true, ...result });
+  });
+
+  router.delete("/companies/:companyId/projects/:projectId/issues", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const projectId = req.params.projectId as string;
+    assertCompanyAccess(req, companyId);
+    if (req.actor.type !== "board") {
+      res.status(403).json({ error: "Only board operators can bulk clean project issues." });
+      return;
+    }
+
+    const result = await svc.removeAllForProject(companyId, projectId);
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "project.issue.bulk_deleted",
+      entityType: "project",
+      entityId: projectId,
+      details: result,
+    });
+    res.json({ ok: true, ...result });
+  });
+
   router.get("/companies/:companyId/labels", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);

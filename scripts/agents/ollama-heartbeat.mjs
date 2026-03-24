@@ -73,6 +73,7 @@ async function main() {
     });
   }
 
+  const approvalContext = inferApprovalContext({ agent: me, issue });
   const wakeCommentId = process.env.PAPERCLIP_WAKE_COMMENT_ID?.trim();
   const heartbeatContextPath = wakeCommentId
     ? `/api/issues/${issue.id}/heartbeat-context?wakeCommentId=${encodeURIComponent(wakeCommentId)}`
@@ -90,21 +91,31 @@ async function main() {
     wakeComment: context.wakeComment ?? null,
     instructions,
     directReports,
+    approvalContext,
   });
 
   const ollama = await callOllama(prompt);
-  const plan = parseDelegationPlan(ollama.response);
+  const approvalRequest = parseApprovalRequest(ollama.response, approvalContext);
+  const plan = parseDelegationPlan(approvalRequest.comment);
   const delegationResult = await maybeCreateDelegatedIssues({
     companyId: me.companyId,
     parentIssue: context.issue,
     directReports,
     plan,
   });
+  const approvalResult = await maybeCreateApprovalRequest({
+    companyId: me.companyId,
+    issue: context.issue,
+    approvalContext,
+    request: approvalRequest.request,
+    diagnostics: approvalRequest.diagnostics,
+  });
   const body = buildIssueComment({
     model: OLLAMA_MODEL,
     issue: context.issue,
     response: plan.comment,
     delegationResult,
+    approvalResult,
   });
 
   await postIssueComment(issue.id, body);
@@ -172,6 +183,26 @@ function buildPrompt(input) {
         "- If you omit the JSON block, Paperclip may still try to infer delegation from markdown sections named like `### Issue cho BA AGENT`, but JSON is more reliable.",
       ].join("\n")
     : "";
+  const approvalSection = input.approvalContext
+    ? [
+        "Approval gate available for this issue",
+        JSON.stringify(input.approvalContext, null, 2),
+        "",
+        "If and only if your final deliverable is complete and ready for review at this gate, append a machine-readable block introduced by the exact marker `APPROVAL_REQUEST_JSON` followed by a single JSON code fence.",
+        "Do not mention these formatting instructions in the human-facing markdown answer.",
+        "For BA, DESIGNER, and QA deliverables, requesting approval when the package is complete is expected and should happen automatically.",
+        "Do not request approval if the deliverable is still incomplete or still needs clarification.",
+        "If you do request approval, keep the JSON concise and use the exact `type` provided in the approval context.",
+        "",
+        "The JSON schema is:",
+        JSON.stringify({
+          requestApproval: true,
+          type: input.approvalContext.type,
+          stage: input.approvalContext.stage,
+          summary: "short reviewer-facing summary",
+        }, null, 2),
+      ].join("\n")
+    : "";
 
   return [
     input.instructions ? `Agent instructions\n${input.instructions}\n` : "",
@@ -206,6 +237,8 @@ function buildPrompt(input) {
     "Wake comment",
     wakeComment,
     "",
+    approvalSection,
+    approvalSection ? "" : "",
     directReportsSection,
     directReportsSection ? "" : "",
     OLLAMA_PROMPT_TEMPLATE.trim().length > 0
@@ -285,6 +318,25 @@ function buildIssueComment(input) {
       lines.push(...input.delegationResult.notes.map((note) => `- Ghi chú: ${note}`));
     }
   }
+  if (
+    input.approvalResult?.created ||
+    input.approvalResult?.skipped?.length > 0 ||
+    input.approvalResult?.notes?.length > 0
+  ) {
+    lines.push(
+      "",
+      "### Kết quả approval tự động",
+    );
+    if (input.approvalResult.created) {
+      lines.push(`- Đã tạo approval ${input.approvalResult.created.id.slice(0, 8)}: ${input.approvalResult.created.type}`);
+    }
+    if (input.approvalResult.skipped?.length > 0) {
+      lines.push(...input.approvalResult.skipped.map((note) => `- Bỏ qua: ${note}`));
+    }
+    if (input.approvalResult.notes?.length > 0) {
+      lines.push(...input.approvalResult.notes.map((note) => `- Ghi chú: ${note}`));
+    }
+  }
   lines.push(
     "",
     "---",
@@ -298,6 +350,11 @@ function buildIssueComment(input) {
 
 function normalizeAgentResponse(response) {
   let text = response.trim();
+
+  const approvalMarkerIndex = text.indexOf("APPROVAL_REQUEST_JSON");
+  if (approvalMarkerIndex >= 0) {
+    text = text.slice(0, approvalMarkerIndex).trim();
+  }
 
   const planMarkerIndex = text.indexOf("DELEGATION_PLAN_JSON");
   if (planMarkerIndex >= 0) {
@@ -326,6 +383,105 @@ function normalizeAgentResponse(response) {
   text = text.replace(/^#\s+Ollama trial update\s*/i, "").trim();
 
   return text;
+}
+
+function inferApprovalContext(input) {
+  const roleSource = `${readNonEmptyString(input.agent?.name)} ${readNonEmptyString(input.agent?.role)}`.toLocaleUpperCase();
+  if (roleSource.includes("BA")) {
+    return {
+      type: "approve_requirement_package",
+      stage: "Requirement Package",
+      gate: "Requirement Package Approval",
+      requestedFor: "PM",
+      summary: "Review and approve the requirement package before technical solutioning starts.",
+    };
+  }
+  if (roleSource.includes("DESIGNER")) {
+    return {
+      type: "approve_design_package",
+      stage: "UX/UI Design",
+      gate: "UX/UI Design Approval",
+      requestedFor: "PM + TECH LEAD",
+      summary: "Review and approve the UX/UI design package before development starts.",
+    };
+  }
+  if (roleSource.includes("QA")) {
+    return {
+      type: "approve_qa_exit",
+      stage: "QA Exit",
+      gate: "QA Exit Approval",
+      requestedFor: "TECH LEAD + PM",
+      summary: "Review and approve QA exit readiness before UAT or go-live.",
+    };
+  }
+  return null;
+}
+
+function parseApprovalRequest(response, approvalContext) {
+  if (!approvalContext) {
+    return { comment: response.trim(), request: null, diagnostics: [] };
+  }
+
+  const marker = "APPROVAL_REQUEST_JSON";
+  const markerIndex = response.indexOf(marker);
+  if (markerIndex < 0) {
+    const inferred = inferApprovalRequestFromMarkdown(response, approvalContext);
+    return {
+      comment: response.trim(),
+      request: inferred,
+      diagnostics: inferred ? ["Không có APPROVAL_REQUEST_JSON, đã fallback parse từ markdown."] : [],
+    };
+  }
+
+  const remainder = response.slice(markerIndex + marker.length);
+  const match = remainder.match(/```json\s*([\s\S]*?)```/i) ?? remainder.match(/```\s*([\s\S]*?)```/i);
+  const comment = response.slice(0, markerIndex).trim();
+  if (!match?.[1]) {
+    const inferred = inferApprovalRequestFromMarkdown(comment, approvalContext);
+    return {
+      comment,
+      request: inferred,
+      diagnostics: inferred
+        ? ["Marker approval có mặt nhưng thiếu JSON block; đã fallback parse từ markdown."]
+        : ["Marker approval có mặt nhưng thiếu JSON block."],
+    };
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(match[1]);
+  } catch (error) {
+    const inferred = inferApprovalRequestFromMarkdown(comment, approvalContext);
+    return {
+      comment,
+      request: inferred,
+      diagnostics: inferred
+        ? ["Approval JSON không hợp lệ; đã fallback parse từ markdown."]
+        : [`Approval JSON không hợp lệ: ${error instanceof Error ? error.message : String(error)}`],
+    };
+  }
+
+  const requestApproval = parsed?.requestApproval;
+  if (requestApproval !== true) {
+    return { comment, request: null, diagnostics: [] };
+  }
+
+  const type = readNonEmptyString(parsed?.type) || approvalContext.type;
+  const stage = readNonEmptyString(parsed?.stage) || approvalContext.stage;
+  const summary = readNonEmptyString(parsed?.summary) || approvalContext.summary;
+  if (!type || !stage || !summary) {
+    return { comment, request: null, diagnostics: ["Approval request thiếu type/stage/summary hợp lệ."] };
+  }
+
+  return {
+    comment,
+    request: {
+      type,
+      stage,
+      summary,
+    },
+    diagnostics: [],
+  };
 }
 
 function parseDelegationPlan(response) {
@@ -484,6 +640,68 @@ async function maybeCreateDelegatedIssues(input) {
   return { created, skipped, notes };
 }
 
+async function maybeCreateApprovalRequest(input) {
+  const result = { created: null, skipped: [], notes: [...(input.diagnostics ?? [])] };
+  if (!input.approvalContext) {
+    return result;
+  }
+  if (!input.request) {
+    return result;
+  }
+
+  const linkedApprovals = await apiJson(`/api/issues/${input.issue.id}/approvals`);
+  const sameType = Array.isArray(linkedApprovals)
+    ? linkedApprovals
+        .filter((approval) => approval && approval.type === input.request.type)
+        .sort((a, b) => String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? "")))
+    : [];
+  const latest = sameType[0] ?? null;
+  if (latest?.status === "pending") {
+    result.skipped.push("Approval cùng loại đang pending, không tạo lại.");
+    return result;
+  }
+  if (latest?.status === "approved") {
+    result.skipped.push("Approval cùng loại đã approved, không tạo lại.");
+    return result;
+  }
+
+  const requestedByAgentId =
+    input.issue.createdByAgentId ??
+    input.issue.assigneeAgentId ??
+    input.issue.lastAssignedAgentId ??
+    null;
+
+  const approval = await apiJson(`/api/companies/${input.companyId}/approvals`, {
+    method: "POST",
+    includeRunId: true,
+    body: {
+      type: input.request.type,
+      requestedByAgentId,
+      issueIds: [input.issue.id],
+      payload: {
+        issueId: input.issue.id,
+        issueIdentifier: input.issue.identifier ?? input.issue.id,
+        issueTitle: input.issue.title,
+        stage: input.request.stage,
+        requestedFor: input.approvalContext.requestedFor,
+        summary: input.request.summary,
+      },
+    },
+  });
+
+  await apiJson(`/api/issues/${input.issue.id}`, {
+    method: "PATCH",
+    includeRunId: true,
+    body: {
+      status: "in_review",
+      comment: `Requested ${input.request.stage} approval in ${approval.id.slice(0, 8)}.`,
+    },
+  });
+
+  result.created = approval;
+  return result;
+}
+
 function resolveDelegationAssignee(input) {
   if (input.task.assigneeAgentId && input.directReportsById.has(input.task.assigneeAgentId)) {
     return input.directReportsById.get(input.task.assigneeAgentId) ?? null;
@@ -555,6 +773,44 @@ function inferDelegationTasksFromMarkdown(response) {
   return { tasks };
 }
 
+function inferApprovalRequestFromMarkdown(response, approvalContext) {
+  const text = response.toLocaleLowerCase();
+  const candidatePhrases = [
+    `sẵn sàng gửi ${approvalContext.gate}`.toLocaleLowerCase(),
+    `sẵn sàng gửi ${approvalContext.stage} approval`.toLocaleLowerCase(),
+    `ready to send ${approvalContext.gate}`.toLocaleLowerCase(),
+    `ready for ${approvalContext.gate}`.toLocaleLowerCase(),
+    `trạng thái sẵn sàng approval`.toLocaleLowerCase(),
+    `sẵn sàng approval`.toLocaleLowerCase(),
+    "co the tien hanh gui yeu cau phe duyet",
+    "có thể tiến hành gửi yêu cầu phê duyệt",
+    "san sang gui yeu cau phe duyet",
+    "sẵn sàng gửi yêu cầu phê duyệt",
+    "ready for approval",
+  ];
+  const explicitReady = candidatePhrases.some((phrase) => text.includes(phrase));
+
+  if (!looksLikeApprovalReady(response, approvalContext, explicitReady)) {
+    return null;
+  }
+  const deliverableReady =
+    looksLikeGateDeliverable(response, approvalContext) ||
+    looksLikeStructuredDeliverable(response, approvalContext);
+
+  if (!explicitReady && !deliverableReady) {
+    // For governed delivery roles, treat a substantive completed response as approval-ready by default.
+    if (!isGovernedDeliveryGate(approvalContext.type)) {
+      return null;
+    }
+  }
+
+  return {
+    type: approvalContext.type,
+    stage: approvalContext.stage,
+    summary: approvalContext.summary,
+  };
+}
+
 function extractSingleLineField(section, label) {
   const match = section.match(new RegExp(`[-*]\\s*\\*\\*?${escapeRegExp(label)}\\*\\*?\\s*:?\\s*(.+)$`, "im"))
     ?? section.match(new RegExp(`${escapeRegExp(label)}\\s*:?\\s*(.+)$`, "im"));
@@ -577,6 +833,139 @@ function extractListField(section, label) {
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function looksLikeApprovalReady(response, approvalContext, explicitReady = false) {
+  const normalized = normalizeComparableTitle(response).replace(/\s+/g, " ");
+  if (!normalized || normalized.length < 180) return false;
+
+  const negativePhrases = [
+    "chua hoan tat",
+    "chưa hoàn tất",
+    "chua san sang",
+    "chưa sẵn sàng",
+    "can lam ro",
+    "cần làm rõ",
+    "can bo sung",
+    "cần bổ sung",
+    "draft",
+    "placeholder",
+    "todo",
+    "to do",
+    "tbd",
+    "wip",
+    "work in progress",
+    "dang lam",
+    "đang làm",
+  ];
+  if (!explicitReady && negativePhrases.some((phrase) => normalized.includes(normalizeComparableTitle(phrase)))) {
+    return false;
+  }
+
+  return true;
+}
+
+function isGovernedDeliveryGate(type) {
+  return [
+    "approve_requirement_package",
+    "approve_design_package",
+    "approve_qa_exit",
+  ].includes(type);
+}
+
+function looksLikeGateDeliverable(response, approvalContext) {
+  const normalized = normalizeComparableTitle(response).replace(/\s+/g, " ");
+
+  if (approvalContext.type === "approve_requirement_package") {
+    return countPhraseGroups(normalized, [
+      ["requirement package", "goi yeu cau", "gói yêu cầu"],
+      ["scope", "pham vi", "phạm vi"],
+      ["actor"],
+      ["user flow", "luong nguoi dung", "luồng người dùng"],
+      ["business rule", "business rules", "nghiep vu", "nghiệp vụ"],
+      ["acceptance criteria", "tieu chi chap nhan", "tiêu chí chấp nhận"],
+    ]) >= 4;
+  }
+
+  if (approvalContext.type === "approve_design_package") {
+    return countPhraseGroups(normalized, [
+      ["ux flow"],
+      ["wireframe"],
+      ["ui structure", "cau truc ui", "cấu trúc ui"],
+      ["ui package"],
+      ["muc tieu thiet ke", "mục tiêu thiết kế"],
+      ["tieu chi hoan thanh", "tiêu chí hoàn thành"],
+    ]) >= 3;
+  }
+
+  if (approvalContext.type === "approve_qa_exit") {
+    return countPhraseGroups(normalized, [
+      ["pham vi kiem thu", "phạm vi kiểm thử", "test scope"],
+      ["ket qua kiem thu", "kết quả kiểm thử", "test result"],
+      ["defect"],
+      ["regression"],
+      ["readiness", "san sang", "sẵn sàng"],
+      ["qa exit"],
+    ]) >= 3;
+  }
+
+  return false;
+}
+
+function looksLikeStructuredDeliverable(response, approvalContext) {
+  const normalized = normalizeComparableTitle(response).replace(/\s+/g, " ");
+
+  const generalSectionGroups = [
+    ["muc tieu", "mục tiêu", "objective"],
+    ["pham vi", "phạm vi", "scope"],
+    ["ngoai pham vi", "ngoài phạm vi", "out of scope"],
+    ["ket qua can dat", "kết quả cần đạt", "deliverable", "deliverables"],
+    ["tieu chi hoan thanh", "tiêu chí hoàn thành", "completion criteria"],
+    ["san sang", "sẵn sàng", "ready"],
+  ];
+
+  const requirementGroups = [
+    ["actor", "actors"],
+    ["user flow", "luong nguoi dung", "luồng người dùng"],
+    ["business rule", "business rules", "nghiep vu", "nghiệp vụ"],
+    ["acceptance criteria", "tieu chi chap nhan", "tiêu chí chấp nhận"],
+  ];
+
+  const designGroups = [
+    ["ux flow"],
+    ["wireframe"],
+    ["ui structure", "cau truc ui", "cấu trúc ui"],
+    ["ui package"],
+    ["review"],
+  ];
+
+  const qaGroups = [
+    ["test scope", "pham vi kiem thu", "phạm vi kiểm thử"],
+    ["test result", "ket qua kiem thu", "kết quả kiểm thử"],
+    ["defect"],
+    ["regression"],
+    ["readiness", "san sang", "sẵn sàng"],
+  ];
+
+  const generalScore = countPhraseGroups(normalized, generalSectionGroups);
+  if (approvalContext.type === "approve_requirement_package") {
+    return generalScore >= 2 && countPhraseGroups(normalized, requirementGroups) >= 2;
+  }
+  if (approvalContext.type === "approve_design_package") {
+    return generalScore >= 2 && countPhraseGroups(normalized, designGroups) >= 2;
+  }
+  if (approvalContext.type === "approve_qa_exit") {
+    return generalScore >= 2 && countPhraseGroups(normalized, qaGroups) >= 2;
+  }
+
+  return false;
+}
+
+function countPhraseGroups(normalized, groups) {
+  return groups.reduce((count, group) => {
+    const matched = group.some((phrase) => normalized.includes(normalizeComparableTitle(phrase)));
+    return count + (matched ? 1 : 0);
+  }, 0);
 }
 
 function pickIssue(inbox) {

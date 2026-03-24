@@ -543,6 +543,10 @@ export function AgentDetail() {
     .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
   const reportsToAgent = (allAgents ?? []).find((a) => a.id === agent?.reportsTo);
   const directReports = (allAgents ?? []).filter((a) => a.reportsTo === agent?.id && a.status !== "terminated");
+  const reportingLineAgents = useMemo(
+    () => (agent ? collectReportingLineAgents(agent.id, allAgents ?? []) : []),
+    [agent, allAgents],
+  );
   const agentBudgetSummary = useMemo(() => {
     const matched = budgetOverview?.policies.find(
       (policy) => policy.scopeType === "agent" && policy.scopeId === (agent?.id ?? routeAgentRef),
@@ -988,6 +992,7 @@ export function AgentDetail() {
           agent={agent}
           approvals={allApprovals ?? []}
           agents={allAgents ?? []}
+          reportingLineAgents={reportingLineAgents}
           isMutating={approveApprovalMutation.isPending || rejectApprovalMutation.isPending}
           onApprove={(approvalId) => approveApprovalMutation.mutate(approvalId)}
           onReject={(approvalId) => rejectApprovalMutation.mutate(approvalId)}
@@ -1202,10 +1207,39 @@ function approvalRequestedFor(approval: Approval): string | null {
   return typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : null;
 }
 
+function collectReportingLineAgents(agentId: string, agents: Agent[]) {
+  const byManager = new Map<string, Agent[]>();
+  for (const candidate of agents) {
+    if (!candidate.reportsTo) continue;
+    const siblings = byManager.get(candidate.reportsTo) ?? [];
+    siblings.push(candidate);
+    byManager.set(candidate.reportsTo, siblings);
+  }
+
+  const collected: Agent[] = [];
+  const seen = new Set<string>();
+  const stack = [agentId];
+
+  while (stack.length > 0) {
+    const currentId = stack.pop();
+    if (!currentId || seen.has(currentId)) continue;
+    seen.add(currentId);
+
+    const current = agents.find((candidate) => candidate.id === currentId);
+    if (current) collected.push(current);
+
+    const reports = byManager.get(currentId) ?? [];
+    for (const report of reports) stack.push(report.id);
+  }
+
+  return collected;
+}
+
 function WorkflowTab({
   agent,
   approvals,
   agents,
+  reportingLineAgents,
   isMutating,
   onApprove,
   onReject,
@@ -1213,6 +1247,7 @@ function WorkflowTab({
   agent: Agent;
   approvals: Approval[];
   agents: Agent[];
+  reportingLineAgents: Agent[];
   isMutating: boolean;
   onApprove: (approvalId: string) => void;
   onReject: (approvalId: string) => void;
@@ -1220,14 +1255,20 @@ function WorkflowTab({
   const [filter, setFilter] = useState<WorkflowFilter>("pending");
 
   const relevantApprovals = useMemo(() => {
-    const agentName = agent.name.trim().toLowerCase();
+    const workflowAgentIds = new Set(reportingLineAgents.map((candidate) => candidate.id));
+    const workflowAgentNames = new Set(
+      reportingLineAgents.map((candidate) => candidate.name.trim().toLowerCase()).filter(Boolean),
+    );
     return approvals
       .filter((approval) => {
         const requestedFor = approvalRequestedFor(approval)?.toLowerCase() ?? "";
-        return approval.requestedByAgentId === agent.id || requestedFor === agentName;
+        return (
+          (approval.requestedByAgentId ? workflowAgentIds.has(approval.requestedByAgentId) : false) ||
+          workflowAgentNames.has(requestedFor)
+        );
       })
       .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
-  }, [agent.id, agent.name, approvals]);
+  }, [approvals, reportingLineAgents]);
 
   const counts = useMemo(() => {
     const pending = relevantApprovals.filter(
@@ -1254,7 +1295,7 @@ function WorkflowTab({
         <div>
           <h3 className="text-lg font-semibold">Workflow</h3>
           <p className="text-sm text-muted-foreground">
-            Review approvals routed through or back to {agent.name}.
+            Review approvals across {agent.name}'s reporting line.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -1287,7 +1328,7 @@ function WorkflowTab({
         <ChartCard title="Rejected" subtitle="Declined approvals">
           <div className="text-4xl font-semibold">{counts.rejected}</div>
         </ChartCard>
-        <ChartCard title="Total" subtitle="Approvals linked to this agent">
+        <ChartCard title="Total" subtitle="Approvals across this reporting line">
           <div className="text-4xl font-semibold">{counts.all}</div>
         </ChartCard>
       </div>
