@@ -11,6 +11,7 @@ import { validate } from "../middleware/validate.js";
 import { logger } from "../middleware/logger.js";
 import {
   approvalService,
+  agentService,
   heartbeatService,
   issueApprovalService,
   issueService,
@@ -72,9 +73,22 @@ function approvalGateMeta(type: string) {
   return null;
 }
 
+function normalizeComparableAgentName(value: string | null | undefined) {
+  return value?.trim().toLowerCase() ?? "";
+}
+
+function requestedForCandidates(value: unknown) {
+  if (typeof value !== "string") return [];
+  return value
+    .split(/->|[+,/&]/g)
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0);
+}
+
 export function approvalRoutes(db: Db) {
   const router = Router();
   const svc = approvalService(db);
+  const agentsSvc = agentService(db);
   const heartbeat = heartbeatService(db);
   const issueApprovalsSvc = issueApprovalService(db);
   const issuesSvc = issueService(db);
@@ -129,6 +143,62 @@ export function approvalRoutes(db: Db) {
       }
 
     }
+  }
+
+  async function resolveApprovalResumeContext(
+    approval: Awaited<ReturnType<typeof svc.getById>>,
+    linkedIssues: Awaited<ReturnType<typeof issueApprovalsSvc.listIssuesForApproval>>,
+  ) {
+    const primaryLinkedIssue = linkedIssues[0] ?? null;
+    if (!primaryLinkedIssue) {
+      return {
+        resumeIssue: null,
+        wakeAgentId: approval?.requestedByAgentId ?? null,
+      };
+    }
+
+    const primaryIssue = await issuesSvc.getById(primaryLinkedIssue.id);
+    const resumeIssue =
+      primaryIssue?.parentId ? await issuesSvc.getById(primaryIssue.parentId) : primaryIssue;
+    const resumeOwnerAgentId =
+      resumeIssue?.assigneeAgentId ??
+      resumeIssue?.lastAssignedAgentId ??
+      null;
+
+    if (resumeOwnerAgentId) {
+      return {
+        resumeIssue,
+        wakeAgentId: resumeOwnerAgentId,
+      };
+    }
+
+    const candidateNames = requestedForCandidates(approval?.payload?.requestedFor);
+    if (candidateNames.length === 0) {
+      return {
+        resumeIssue,
+        wakeAgentId: approval?.requestedByAgentId ?? null,
+      };
+    }
+
+    const availableAgents = await agentsSvc.list(approval.companyId);
+    const availableAgentsByName = new Map(
+      availableAgents.map((agent) => [normalizeComparableAgentName(agent.name), agent]),
+    );
+
+    for (const candidate of candidateNames) {
+      const matched = availableAgentsByName.get(normalizeComparableAgentName(candidate));
+      if (matched) {
+        return {
+          resumeIssue,
+          wakeAgentId: matched.id,
+        };
+      }
+    }
+
+    return {
+      resumeIssue,
+      wakeAgentId: approval?.requestedByAgentId ?? null,
+    };
   }
 
   router.get("/companies/:companyId/approvals", async (req, res) => {
@@ -228,7 +298,22 @@ export function approvalRoutes(db: Db) {
       await applyLinkedIssueApprovalOutcome(approval, "approved");
       const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(approval.id);
       const linkedIssueIds = linkedIssues.map((issue) => issue.id);
-      const primaryIssueId = linkedIssueIds[0] ?? null;
+      const { resumeIssue, wakeAgentId } = await resolveApprovalResumeContext(approval, linkedIssues);
+      const wakeIssueId = resumeIssue?.id ?? linkedIssueIds[0] ?? null;
+
+      if (
+        resumeIssue &&
+        wakeAgentId &&
+        resumeIssue.status !== "done" &&
+        resumeIssue.status !== "cancelled" &&
+        (resumeIssue.assigneeAgentId !== wakeAgentId || resumeIssue.assigneeUserId !== null)
+      ) {
+        await issuesSvc.update(resumeIssue.id, {
+          assigneeAgentId: wakeAgentId,
+          assigneeUserId: null,
+          status: resumeIssue.status === "in_review" ? "todo" : resumeIssue.status,
+        });
+      }
 
       await logActivity(db, {
         companyId: approval.companyId,
@@ -244,16 +329,16 @@ export function approvalRoutes(db: Db) {
         },
       });
 
-      if (approval.requestedByAgentId) {
+      if (wakeAgentId) {
         try {
-          const wakeRun = await heartbeat.wakeup(approval.requestedByAgentId, {
+          const wakeRun = await heartbeat.wakeup(wakeAgentId, {
             source: "automation",
             triggerDetail: "system",
             reason: "approval_approved",
             payload: {
               approvalId: approval.id,
               approvalStatus: approval.status,
-              issueId: primaryIssueId,
+              issueId: wakeIssueId,
               issueIds: linkedIssueIds,
             },
             requestedByActorType: "user",
@@ -262,9 +347,9 @@ export function approvalRoutes(db: Db) {
               source: "approval.approved",
               approvalId: approval.id,
               approvalStatus: approval.status,
-              issueId: primaryIssueId,
+              issueId: wakeIssueId,
               issueIds: linkedIssueIds,
-              taskId: primaryIssueId,
+              taskId: wakeIssueId,
               wakeReason: "approval_approved",
             },
           });
@@ -278,6 +363,8 @@ export function approvalRoutes(db: Db) {
             entityId: approval.id,
             details: {
               requesterAgentId: approval.requestedByAgentId,
+              resumedAgentId: wakeAgentId,
+              resumeIssueId: wakeIssueId,
               wakeRunId: wakeRun?.id ?? null,
               linkedIssueIds,
             },
@@ -288,6 +375,8 @@ export function approvalRoutes(db: Db) {
               err,
               approvalId: approval.id,
               requestedByAgentId: approval.requestedByAgentId,
+              resumedAgentId: wakeAgentId,
+              resumeIssueId: wakeIssueId,
             },
             "failed to queue requester wakeup after approval",
           );
@@ -300,6 +389,8 @@ export function approvalRoutes(db: Db) {
             entityId: approval.id,
             details: {
               requesterAgentId: approval.requestedByAgentId,
+              resumedAgentId: wakeAgentId,
+              resumeIssueId: wakeIssueId,
               linkedIssueIds,
               error: err instanceof Error ? err.message : String(err),
             },
