@@ -257,7 +257,7 @@ async function labelMapForIssues(dbOrTx: any, issueIds: string[]): Promise<Map<s
   return map;
 }
 
-async function withIssueLabels(dbOrTx: any, rows: IssueRow[]): Promise<IssueWithLabels[]> {
+  async function withIssueLabels(dbOrTx: any, rows: IssueRow[]): Promise<IssueWithLabels[]> {
   if (rows.length === 0) return [];
   const labelsByIssueId = await labelMapForIssues(dbOrTx, rows.map((row) => row.id));
   return rows.map((row) => {
@@ -268,7 +268,85 @@ async function withIssueLabels(dbOrTx: any, rows: IssueRow[]): Promise<IssueWith
       labelIds: issueLabels.map((label) => label.id),
     };
   });
-}
+  }
+
+  async function inheritParentTouchStateToChildIssue(
+    tx: any,
+    input: {
+      companyId: string;
+      parentId: string | null | undefined;
+      childIssueId: string;
+    },
+  ) {
+    if (!input.parentId) return;
+
+    const parent = await tx
+      .select({
+        id: issues.id,
+        createdByUserId: issues.createdByUserId,
+        assigneeUserId: issues.assigneeUserId,
+      })
+      .from(issues)
+      .where(and(eq(issues.id, input.parentId), eq(issues.companyId, input.companyId)))
+      .then(
+        (
+          rows: Array<{
+            id: string;
+            createdByUserId: string | null;
+            assigneeUserId: string | null;
+          }>,
+        ) => rows[0] ?? null,
+      );
+    if (!parent) return;
+
+    const inheritedReadStates = await tx
+      .select({
+        userId: issueReadStates.userId,
+        lastReadAt: issueReadStates.lastReadAt,
+      })
+      .from(issueReadStates)
+      .where(
+        and(
+          eq(issueReadStates.companyId, input.companyId),
+          eq(issueReadStates.issueId, parent.id),
+        ),
+      );
+
+    const inheritedUsers = new Map<string, Date>();
+    for (const row of inheritedReadStates) {
+      if (!row.userId) continue;
+      inheritedUsers.set(row.userId, row.lastReadAt);
+    }
+
+    const now = new Date();
+    if (parent.createdByUserId && !inheritedUsers.has(parent.createdByUserId)) {
+      inheritedUsers.set(parent.createdByUserId, now);
+    }
+    if (parent.assigneeUserId && !inheritedUsers.has(parent.assigneeUserId)) {
+      inheritedUsers.set(parent.assigneeUserId, now);
+    }
+
+    if (inheritedUsers.size === 0) return;
+
+    await tx
+      .insert(issueReadStates)
+      .values(
+        [...inheritedUsers.entries()].map(([userId, lastReadAt]) => ({
+          companyId: input.companyId,
+          issueId: input.childIssueId,
+          userId,
+          lastReadAt,
+          updatedAt: now,
+        })),
+      )
+      .onConflictDoUpdate({
+        target: [issueReadStates.companyId, issueReadStates.issueId, issueReadStates.userId],
+        set: {
+          lastReadAt: sql`GREATEST(${issueReadStates.lastReadAt}, excluded.last_read_at)`,
+          updatedAt: now,
+        },
+      });
+  }
 
 const ACTIVE_RUN_STATUSES = ["queued", "running"];
 
@@ -775,6 +853,11 @@ export function issueService(db: Db) {
         }
 
         const [issue] = await tx.insert(issues).values(values).returning();
+        await inheritParentTouchStateToChildIssue(tx, {
+          companyId,
+          parentId: issue.parentId,
+          childIssueId: issue.id,
+        });
         if (inputLabelIds) {
           await syncIssueLabels(issue.id, companyId, inputLabelIds, tx);
         }

@@ -13,6 +13,7 @@ import {
   approvalService,
   heartbeatService,
   issueApprovalService,
+  issueService,
   logActivity,
   secretService,
 } from "../services/index.js";
@@ -26,13 +27,109 @@ function redactApprovalPayload<T extends { payload: Record<string, unknown> }>(a
   };
 }
 
+function firstMeaningfulLine(value: string | null | undefined) {
+  if (!value) return null;
+  return (
+    value
+      .split("\n")
+      .map((line) => line.trim())
+      .find((line) => line.length > 0) ?? null
+  );
+}
+
+function summarizeCommentBody(value: string | null | undefined, maxLength = 280) {
+  const line = firstMeaningfulLine(value);
+  if (!line) return null;
+  if (line.length <= maxLength) return line;
+  return `${line.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+function approvalGateMeta(type: string) {
+  if (type === "approve_requirement_package") {
+    return {
+      label: "Requirement Package Approval",
+      approvedStatus: "done" as const,
+      revisionStatus: "todo" as const,
+      rejectedStatus: "blocked" as const,
+    };
+  }
+  if (type === "approve_design_package") {
+    return {
+      label: "UX/UI Design Approval",
+      approvedStatus: "done" as const,
+      revisionStatus: "todo" as const,
+      rejectedStatus: "blocked" as const,
+    };
+  }
+  if (type === "approve_qa_exit") {
+    return {
+      label: "QA Exit Approval",
+      approvedStatus: "done" as const,
+      revisionStatus: "todo" as const,
+      rejectedStatus: "blocked" as const,
+    };
+  }
+  return null;
+}
+
 export function approvalRoutes(db: Db) {
   const router = Router();
   const svc = approvalService(db);
   const heartbeat = heartbeatService(db);
   const issueApprovalsSvc = issueApprovalService(db);
+  const issuesSvc = issueService(db);
   const secretsSvc = secretService(db);
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
+
+  async function applyLinkedIssueApprovalOutcome(
+    approval: Awaited<ReturnType<typeof svc.getById>>,
+    outcome: "approved" | "revision_requested" | "rejected",
+  ) {
+    if (!approval) return;
+    const gate = approvalGateMeta(approval.type);
+    if (!gate) return;
+
+    const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(approval.id);
+    const nextStatus =
+      outcome === "approved"
+        ? gate.approvedStatus
+        : outcome === "revision_requested"
+          ? gate.revisionStatus
+          : gate.rejectedStatus;
+    const note =
+      outcome === "approved"
+        ? `${gate.label} approved in ${approval.id.slice(0, 8)}.`
+        : outcome === "revision_requested"
+          ? `${gate.label} requested revision in ${approval.id.slice(0, 8)}. Issue moved back to todo.`
+          : `${gate.label} rejected in ${approval.id.slice(0, 8)}. Issue moved to blocked.`;
+
+    for (const issue of linkedIssues) {
+      await issuesSvc.update(issue.id, { status: nextStatus });
+      await issuesSvc.addComment(issue.id, note, {});
+
+      if (outcome === "approved" && issue.parentId) {
+        const [parentIssue, latestComment] = await Promise.all([
+          issuesSvc.getById(issue.parentId),
+          issuesSvc.listComments(issue.id, { order: "desc", limit: 1 }).then((rows) => rows[0] ?? null),
+        ]);
+        if (parentIssue) {
+          const summary = summarizeCommentBody(latestComment?.body);
+          const issueRef = issue.identifier ?? issue.id;
+          await issuesSvc.addComment(
+            parentIssue.id,
+            [
+              `Sub-issue approved: ${issueRef} - ${issue.title}`,
+              `Approval: ${gate.label} (${approval.id.slice(0, 8)})`,
+              summary ? `Summary: ${summary}` : "Summary: Design issue approved and ready for the next workflow stage.",
+              `Open sub-issue: /issues/${issueRef}`,
+            ].join("\n"),
+            {},
+          );
+        }
+      }
+
+    }
+  }
 
   router.get("/companies/:companyId/approvals", async (req, res) => {
     const companyId = req.params.companyId as string;
@@ -128,6 +225,7 @@ export function approvalRoutes(db: Db) {
     );
 
     if (applied) {
+      await applyLinkedIssueApprovalOutcome(approval, "approved");
       const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(approval.id);
       const linkedIssueIds = linkedIssues.map((issue) => issue.id);
       const primaryIssueId = linkedIssueIds[0] ?? null;
@@ -223,6 +321,7 @@ export function approvalRoutes(db: Db) {
     );
 
     if (applied) {
+      await applyLinkedIssueApprovalOutcome(approval, "rejected");
       await logActivity(db, {
         companyId: approval.companyId,
         actorType: "user",
@@ -248,6 +347,8 @@ export function approvalRoutes(db: Db) {
         req.body.decidedByUserId ?? "board",
         req.body.decisionNote,
       );
+
+      await applyLinkedIssueApprovalOutcome(approval, "revision_requested");
 
       await logActivity(db, {
         companyId: approval.companyId,

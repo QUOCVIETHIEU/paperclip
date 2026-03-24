@@ -346,8 +346,12 @@ function parseDelegationPlan(response) {
   const remainder = response.slice(markerIndex + marker.length);
   const match = remainder.match(/```json\s*([\s\S]*?)```/i) ?? remainder.match(/```\s*([\s\S]*?)```/i);
   if (!match?.[1]) {
-    console.warn("[ollama-heartbeat] Delegation marker found but JSON block is missing; skipping delegation.");
     const inferredTasks = inferDelegationTasksFromMarkdown(comment);
+    if (inferredTasks.tasks.length === 0) {
+      console.warn("[ollama-heartbeat] Delegation marker found but JSON block is missing, and markdown fallback found no tasks.");
+    } else {
+      console.log("[ollama-heartbeat] Delegation marker found without JSON block; recovered via markdown fallback.");
+    }
     return {
       comment,
       tasks: inferredTasks.tasks,
@@ -361,10 +365,16 @@ function parseDelegationPlan(response) {
   try {
     parsed = JSON.parse(match[1]);
   } catch (error) {
-    console.warn(
-      `[ollama-heartbeat] Delegation JSON is invalid: ${error instanceof Error ? error.message : String(error)}; skipping delegation.`,
-    );
     const inferredTasks = inferDelegationTasksFromMarkdown(comment);
+    if (inferredTasks.tasks.length === 0) {
+      console.warn(
+        `[ollama-heartbeat] Delegation JSON is invalid and markdown fallback found no tasks: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } else {
+      console.log(
+        `[ollama-heartbeat] Delegation JSON is invalid; recovered via markdown fallback: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
     return {
       comment,
       tasks: inferredTasks.tasks,

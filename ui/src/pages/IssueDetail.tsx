@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent 
 import { Link, useLocation, useNavigate, useParams } from "@/lib/router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { issuesApi } from "../api/issues";
+import { approvalsApi } from "../api/approvals";
 import { activityApi } from "../api/activity";
 import { heartbeatsApi } from "../api/heartbeats";
 import { agentsApi } from "../api/agents";
@@ -31,6 +32,7 @@ import { PluginLauncherOutlet } from "@/plugins/launchers";
 import { Separator } from "@/components/ui/separator";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -47,6 +49,7 @@ import {
   MessageSquare,
   MoreHorizontal,
   Paperclip,
+  ShieldCheck,
   SlidersHorizontal,
   Trash2,
 } from "lucide-react";
@@ -81,6 +84,54 @@ const ACTION_LABELS: Record<string, string> = {
   "approval.approved": "approved",
   "approval.rejected": "rejected",
 };
+
+function compactUserLabel(userId: string | null | undefined, currentUserId?: string | null) {
+  if (!userId) return null;
+  return userId === currentUserId ? "Me" : "Board";
+}
+
+function inferStageAndGate(
+  issue: { status: string },
+  assigneeName: string | null,
+) {
+  const role = assigneeName?.toUpperCase() ?? "";
+  if (role.includes("CTO")) return { stage: "Inquiry / Intake", gate: "—" };
+  if (role.includes("BA")) return { stage: "Requirement Definition", gate: "Requirement Approval" };
+  if (role.includes("TECH LEAD")) return { stage: "Solutioning", gate: "—" };
+  if (role.includes("DESIGNER")) return { stage: "UX/UI Design", gate: "UX/UI Approval" };
+  if (role.includes("QA")) return { stage: "QA Validation", gate: "QA Exit Approval" };
+  if (role.includes("SD")) return { stage: "Service Desk", gate: "—" };
+  if (
+    role.includes("FE") ||
+    role.includes("BE") ||
+    role.includes("INTEGRATION") ||
+    role.includes("DEVOPS")
+  ) {
+    return { stage: "Development", gate: "—" };
+  }
+  if (role.includes("PM")) return { stage: "Delivery Coordination", gate: "—" };
+  return { stage: issue.status === "done" ? "Completed" : "Execution", gate: "—" };
+}
+
+function stageBadgeClass(stage: string) {
+  if (stage === "Inquiry / Intake") return "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300";
+  if (stage === "Requirement Definition") return "border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300";
+  if (stage === "Solutioning") return "border-violet-500/30 bg-violet-500/10 text-violet-700 dark:text-violet-300";
+  if (stage === "UX/UI Design") return "border-pink-500/30 bg-pink-500/10 text-pink-700 dark:text-pink-300";
+  if (stage === "Development") return "border-cyan-500/30 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300";
+  if (stage === "QA Validation") return "border-orange-500/30 bg-orange-500/10 text-orange-700 dark:text-orange-300";
+  if (stage === "Service Desk") return "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
+  if (stage === "Delivery Coordination") return "border-indigo-500/30 bg-indigo-500/10 text-indigo-700 dark:text-indigo-300";
+  if (stage === "Completed") return "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
+  return "border-border bg-muted text-muted-foreground";
+}
+
+function gateBadgeClass(gate: string) {
+  if (gate === "Requirement Approval") return "border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300";
+  if (gate === "UX/UI Approval") return "border-pink-500/30 bg-pink-500/10 text-pink-700 dark:text-pink-300";
+  if (gate === "QA Exit Approval") return "border-orange-500/30 bg-orange-500/10 text-orange-700 dark:text-orange-300";
+  return "border-border bg-muted text-muted-foreground";
+}
 
 function humanizeValue(value: unknown): string {
   if (typeof value !== "string") return String(value ?? "none");
@@ -361,6 +412,21 @@ export function IssueDetail() {
       .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
   }, [allIssues, issue]);
 
+  const linkedRequirementApproval = useMemo(
+    () => (linkedApprovals ?? []).find((approval) => approval.type === "approve_requirement_package") ?? null,
+    [linkedApprovals],
+  );
+
+  const linkedDesignApproval = useMemo(
+    () => (linkedApprovals ?? []).find((approval) => approval.type === "approve_design_package") ?? null,
+    [linkedApprovals],
+  );
+
+  const linkedQaExitApproval = useMemo(
+    () => (linkedApprovals ?? []).find((approval) => approval.type === "approve_qa_exit") ?? null,
+    [linkedApprovals],
+  );
+
   const commentReassignOptions = useMemo(() => {
     const options: Array<{ id: string; label: string; searchText?: string }> = [];
     const activeAgents = [...(agents ?? [])]
@@ -508,6 +574,59 @@ export function IssueDetail() {
     },
   });
 
+  const requestStageApproval = useMutation({
+    mutationFn: async ({
+      type,
+      stage,
+      summary,
+    }: {
+      type: "approve_requirement_package" | "approve_design_package" | "approve_qa_exit";
+      stage: string;
+      summary: string;
+    }) => {
+      if (!issue || !resolvedCompanyId) throw new Error("Issue not loaded");
+      const approval = await approvalsApi.create(resolvedCompanyId, {
+        type,
+        requestedByAgentId: issue.createdByAgentId ?? issue.assigneeAgentId ?? null,
+        issueIds: [issue.id],
+        payload: {
+          issueId: issue.id,
+          issueIdentifier: issue.identifier ?? issue.id,
+          issueTitle: issue.title,
+          stage,
+          requestedFor:
+            agentMap.get(issue.createdByAgentId ?? "")?.name ??
+            agentMap.get(issue.assigneeAgentId ?? "")?.name ??
+            "Approval",
+          summary,
+        },
+      });
+      await issuesApi.update(issue.id, {
+        status: "in_review",
+        comment: `Requested ${stage} approval in ${approval.id.slice(0, 8)}.`,
+      });
+      return approval;
+    },
+    onSuccess: () => {
+      invalidateIssue();
+      if (resolvedCompanyId) {
+        queryClient.invalidateQueries({ queryKey: queryKeys.approvals.list(resolvedCompanyId) });
+      }
+      pushToast({
+        title: "Approval Requested",
+        body: "Issue moved to in_review and linked approval has been created.",
+        tone: "success",
+      });
+    },
+    onError: (error) => {
+      pushToast({
+        title: "Failed to request approval",
+        body: error instanceof Error ? error.message : "Unknown error",
+        tone: "error",
+      });
+    },
+  });
+
   const uploadAttachment = useMutation({
     mutationFn: async (file: File) => {
       if (!selectedCompanyId) throw new Error("No company selected");
@@ -612,6 +731,27 @@ export function IssueDetail() {
 
   // Ancestors are returned oldest-first from the server (root at end, immediate parent at start)
   const ancestors = issue.ancestors ?? [];
+  const createdByLabel = issue.createdByAgentId
+    ? (agentMap.get(issue.createdByAgentId)?.name ?? "Agent")
+    : (compactUserLabel(issue.createdByUserId, currentUserId) ?? "System");
+  const assigneeLabel = issue.assigneeAgentId
+    ? (agentMap.get(issue.assigneeAgentId)?.name ?? "Agent")
+    : issue.assigneeUserId
+      ? (compactUserLabel(issue.assigneeUserId, currentUserId) ?? "User")
+      : "Unassigned";
+  const parentRef = issue.parentId
+    ? (ancestors[0]?.identifier ?? issue.parentId.slice(0, 8))
+    : "Root";
+  const workflowChain = [...ancestors]
+    .reverse()
+    .map((ancestor) => {
+      if (ancestor.assigneeAgentId) return agentMap.get(ancestor.assigneeAgentId)?.name ?? "Agent";
+      if (ancestor.assigneeUserId) return compactUserLabel(ancestor.assigneeUserId, currentUserId) ?? "Board";
+      return "Unassigned";
+    })
+    .concat(assigneeLabel)
+    .join(" -> ");
+  const stageAndGate = inferStageAndGate(issue, assigneeLabel);
   const handleFilePicked = async (evt: ChangeEvent<HTMLInputElement>) => {
     const files = evt.target.files;
     if (!files || files.length === 0) return;
@@ -692,6 +832,42 @@ export function IssueDetail() {
           <span className="text-foreground/60 truncate max-w-[200px]">{issue.title}</span>
         </nav>
       )}
+
+      <div className="grid grid-cols-1 gap-3 rounded-lg border border-border bg-card/40 p-3 sm:grid-cols-2 xl:grid-cols-3">
+        <div className="min-w-0">
+          <div className="text-[11px] uppercase tracking-wide text-muted-foreground">From</div>
+          <div className="truncate text-sm">{createdByLabel}</div>
+        </div>
+        <div className="min-w-0">
+          <div className="text-[11px] uppercase tracking-wide text-muted-foreground">To</div>
+          <div className="truncate text-sm">{assigneeLabel}</div>
+        </div>
+        <div className="min-w-0">
+          <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Parent</div>
+          <div className="truncate text-sm">{parentRef}</div>
+        </div>
+        <div className="min-w-0">
+          <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Flow</div>
+          <div className="truncate text-sm" title={workflowChain}>{workflowChain}</div>
+        </div>
+        <div className="min-w-0">
+          <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Stage / Gate</div>
+          <div className="flex flex-wrap gap-1 pt-0.5">
+            <Badge variant="outline" className={cn("px-1.5 py-0 text-[10px]", stageBadgeClass(stageAndGate.stage))}>
+              {stageAndGate.stage}
+            </Badge>
+            {stageAndGate.gate !== "—" && (
+              <Badge variant="outline" className={cn("px-1.5 py-0 text-[10px]", gateBadgeClass(stageAndGate.gate))}>
+                {stageAndGate.gate}
+              </Badge>
+            )}
+          </div>
+        </div>
+        <div className="min-w-0">
+          <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Updated</div>
+          <div className="truncate text-sm">{relativeTime(issue.updatedAt)}</div>
+        </div>
+      </div>
 
       {issue.hiddenAt && (
         <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
@@ -1085,6 +1261,113 @@ export function IssueDetail() {
           </TabsContent>
         )}
       </Tabs>
+
+      {issue && (
+        <div className="rounded-lg border border-border p-3">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-medium">UX/UI Approval Gate</div>
+              <div className="text-xs text-muted-foreground">
+                Request approval for the design package before moving to the next workflow stage.
+              </div>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="shrink-0"
+              onClick={() =>
+                requestStageApproval.mutate({
+                  type: "approve_requirement_package",
+                  stage: "Requirement Package",
+                  summary: "Review and approve the requirement package before technical solutioning starts.",
+                })
+              }
+              disabled={
+                requestStageApproval.isPending ||
+                linkedRequirementApproval?.status === "pending" ||
+                linkedRequirementApproval?.status === "revision_requested"
+              }
+            >
+              <ShieldCheck className="mr-1.5 h-4 w-4" />
+              {linkedRequirementApproval ? "Requirement Requested" : "Request Requirement Approval"}
+            </Button>
+          </div>
+          {linkedRequirementApproval && (
+            <div className="mt-2 text-xs text-muted-foreground">
+              Requirement approval: <span className="font-medium">{linkedRequirementApproval.status}</span>
+            </div>
+          )}
+          <div className="mt-3 flex items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-medium">UX/UI Design Gate</div>
+              <div className="text-xs text-muted-foreground">
+                Request approval for the design package before development starts.
+              </div>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="shrink-0"
+              onClick={() =>
+                requestStageApproval.mutate({
+                  type: "approve_design_package",
+                  stage: "UX/UI Design",
+                  summary: "Review and approve the UX/UI design package before development starts.",
+                })
+              }
+              disabled={
+                requestStageApproval.isPending ||
+                linkedDesignApproval?.status === "pending" ||
+                linkedDesignApproval?.status === "revision_requested"
+              }
+            >
+              <ShieldCheck className="mr-1.5 h-4 w-4" />
+              {linkedDesignApproval ? "Design Requested" : "Request UX/UI Approval"}
+            </Button>
+          </div>
+          {linkedDesignApproval && (
+            <div className="mt-2 text-xs text-muted-foreground">
+              Design approval: <span className="font-medium">{linkedDesignApproval.status}</span>
+            </div>
+          )}
+          <div className="mt-3 flex items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-medium">QA Exit Gate</div>
+              <div className="text-xs text-muted-foreground">
+                Request approval for QA internal validation before UAT or go-live readiness.
+              </div>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="shrink-0"
+              onClick={() =>
+                requestStageApproval.mutate({
+                  type: "approve_qa_exit",
+                  stage: "QA Exit",
+                  summary: "Review and approve QA exit readiness before UAT or go-live.",
+                })
+              }
+              disabled={
+                requestStageApproval.isPending ||
+                linkedQaExitApproval?.status === "pending" ||
+                linkedQaExitApproval?.status === "revision_requested"
+              }
+            >
+              <ShieldCheck className="mr-1.5 h-4 w-4" />
+              {linkedQaExitApproval ? "QA Exit Requested" : "Request QA Exit Approval"}
+            </Button>
+          </div>
+          {linkedQaExitApproval && (
+            <div className="mt-2 text-xs text-muted-foreground">
+              QA exit approval: <span className="font-medium">{linkedQaExitApproval.status}</span>
+            </div>
+          )}
+        </div>
+      )}
 
       {linkedApprovals && linkedApprovals.length > 0 && (
         <Collapsible
