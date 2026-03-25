@@ -37,7 +37,7 @@ import {
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { PluginLauncherOutlet } from "@/plugins/launchers";
 import { PluginSlotMount, PluginSlotOutlet, usePluginSlots } from "@/plugins/slots";
-import { Activity, AlertTriangle, CheckCircle2, ChevronDown, ShieldCheck, Trash2 } from "lucide-react";
+import { Activity, AlertTriangle, CheckCircle2, ChevronDown, CircleDashed, Hourglass, LoaderCircle, ShieldCheck, Trash2, XCircle } from "lucide-react";
 import type { Approval } from "@paperclipai/shared";
 import { MarkdownBody } from "../components/MarkdownBody";
 
@@ -47,6 +47,14 @@ type ProjectBaseTab = "overview" | "list" | "configuration" | "budget";
 type ProjectPluginTab = `plugin:${string}`;
 type ProjectTab = ProjectBaseTab | ProjectPluginTab;
 type ApprovalRow = { issueId: string; issueTitle: string; approval: Approval };
+type StageSubstepStatus = "waiting" | "in_progress" | "done" | "pending" | "rejected";
+type StageSubstep = {
+  key: string;
+  label: string;
+  status: StageSubstepStatus;
+  meta?: string | null;
+  previewIssueId?: string | null;
+};
 
 function isProjectPluginTab(value: string | null): value is ProjectPluginTab {
   return typeof value === "string" && value.startsWith("plugin:");
@@ -84,6 +92,26 @@ function actorLabel(agentId: string | null, userId: string | null, agentNameById
   if (agentId) return agentNameById.get(agentId) ?? agentId.slice(0, 8);
   if (userId) return "Board";
   return "—";
+}
+
+function latestBy<T>(items: T[], getUpdatedAt: (item: T) => Date | string): T | null {
+  return [...items].sort((a, b) => new Date(getUpdatedAt(b)).getTime() - new Date(getUpdatedAt(a)).getTime())[0] ?? null;
+}
+
+function substepIcon(status: StageSubstepStatus) {
+  if (status === "done") return CheckCircle2;
+  if (status === "in_progress") return LoaderCircle;
+  if (status === "pending") return Hourglass;
+  if (status === "rejected") return XCircle;
+  return CircleDashed;
+}
+
+function substepIconClass(status: StageSubstepStatus) {
+  if (status === "done") return "text-emerald-500";
+  if (status === "in_progress") return "text-sky-500";
+  if (status === "pending") return "text-amber-500";
+  if (status === "rejected") return "text-red-500";
+  return "text-muted-foreground";
 }
 
 function IssuePreviewDialog({
@@ -510,6 +538,30 @@ function inferTimelineStageKey(
   const titleText = issue.title.toLowerCase();
   const detailText = `${issue.title}\n${issue.description ?? ""}`.toLowerCase();
 
+  if (/(hypercare|handover|service desk|takeover)/.test(titleText)) return "handover";
+  if (/(uat|go-live|golive|go live|release readiness)/.test(titleText)) return "uat";
+  if (/(ux\/ui|ui\/ux|wireframe|prototype|design|thiết kế|thiet ke|ux flow|ui flow|ui structure)/.test(titleText)) {
+    return "design";
+  }
+  if (/(qa|test|regression|validation|kiểm thử|kiem thu|qa exit)/.test(titleText)) return "qa";
+  if (
+    /(technical solution|solutioning|kế hoạch kỹ thuật|technical planning|module breakdown|dependencies|technical risk|dev approach|kiến trúc|giải pháp kỹ thuật)/.test(
+      titleText,
+    )
+  ) {
+    return "solutioning";
+  }
+  if (/(requirement|yêu cầu|yeu cau|scope|business|actor|user flow|acceptance|requirement package)/.test(titleText)) {
+    return "requirement";
+  }
+  if (
+    /(development|coding|implementation|code review|build ready|deploy|fix bug|bugfix|hotfix|release readiness|triển khai|phát triển|lập trình|sửa lỗi)/.test(
+      titleText,
+    )
+  ) {
+    return "development";
+  }
+
   if (role.includes("CTO")) return "intake";
   if (role.includes("BA")) return "requirement";
   if (role.includes("DESIGNER")) return "design";
@@ -517,26 +569,9 @@ function inferTimelineStageKey(
   if (role.includes("SD")) return "handover";
   if (role.includes("FE") || role.includes("BE") || role.includes("INTEGRATION") || role.includes("DEVOPS")) return "development";
   if (role.includes("TECH LEAD")) {
-    if (
-      /(development|coding|implementation|code review|build ready|deploy|fix bug|bugfix|hotfix|release readiness|triển khai|phát triển|lập trình|sửa lỗi)/.test(
-        titleText,
-      )
-    ) {
-      return "development";
-    }
-    if (
-      /(technical solution|solutioning|kế hoạch kỹ thuật|technical planning|module breakdown|dependencies|technical risk|dev approach|kiến trúc|giải pháp kỹ thuật)/.test(
-        titleText,
-      )
-    ) {
-      return "solutioning";
-    }
     return "solutioning";
   }
   if (role.includes("PM")) {
-    if (/(hypercare|handover|service desk|takeover)/.test(titleText)) return "handover";
-    if (/(uat|go-live|golive|go live|release readiness)/.test(titleText)) return "uat";
-    if (/(requirement|yêu cầu|yeu cau|scope|business|actor|user flow|acceptance)/.test(titleText)) return "requirement";
     if (/(hypercare|handover|service desk|takeover)/.test(detailText)) return "handover";
     if (/(uat|go-live|golive|go live|release readiness)/.test(detailText) && !/(requirement|yêu cầu|yeu cau|scope|business|actor|user flow|acceptance)/.test(titleText)) return "uat";
     return "requirement";
@@ -653,7 +688,7 @@ function OverviewContent({
   );
 
   const approvalsByIssue = useMemo(() => {
-    const rows: Array<{ issueId: string; issueTitle: string; approval: { id: string; type: string; status: string; updatedAt: Date | string } }> = [];
+    const rows: ApprovalRow[] = [];
     for (let index = 0; index < (projectIssues ?? []).length; index += 1) {
       const issue = projectIssues![index]!;
       for (const approval of issueApprovalQueries[index]?.data ?? []) {
@@ -725,7 +760,7 @@ function OverviewContent({
         {
           ...stage,
           issues: [] as typeof openIssues,
-          pendingApprovals: [] as typeof pendingApprovals,
+          approvals: [] as typeof approvalsByIssue,
         },
       ]),
     );
@@ -735,6 +770,28 @@ function OverviewContent({
       const stageKey = inferTimelineStageKey(issue, assigneeName);
       if (!stageKey) continue;
       stageMap.get(stageKey)?.issues.push(issue);
+    }
+
+    // Defensive rebucketing: TECH LEAD solutioning issues can be misread as
+    // development later in the flow because their descriptions mention downstream
+    // dev work. Keep title-first intent and move them back to stage 3.
+    const solutioningTitlePattern =
+      /(technical solution|solutioning|kế hoạch kỹ thuật|technical planning|module breakdown|dependencies|technical risk|dev approach|kiến trúc|giải pháp kỹ thuật)/;
+    const developmentTitlePattern =
+      /(development|coding|implementation|code review|build ready|deploy|fix bug|bugfix|hotfix|release readiness|triển khai|phát triển|lập trình|sửa lỗi)/;
+    const developmentBucket = stageMap.get("development");
+    const solutioningBucket = stageMap.get("solutioning");
+    if (developmentBucket && solutioningBucket) {
+      const misbucketedSolutioningIssues = developmentBucket.issues.filter((issue) => {
+        const titleText = issue.title.toLowerCase();
+        return solutioningTitlePattern.test(titleText) && !developmentTitlePattern.test(titleText);
+      });
+      if (misbucketedSolutioningIssues.length > 0) {
+        developmentBucket.issues = developmentBucket.issues.filter(
+          (issue) => !misbucketedSolutioningIssues.some((candidate) => candidate.id === issue.id),
+        );
+        solutioningBucket.issues.push(...misbucketedSolutioningIssues);
+      }
     }
 
     for (const item of pendingApprovals) {
@@ -747,19 +804,39 @@ function OverviewContent({
               ? "qa"
               : null;
       if (!stageKey) continue;
-      stageMap.get(stageKey)?.pendingApprovals.push(item);
+      stageMap.get(stageKey)?.approvals.push(item);
+    }
+
+    for (const item of approvalsByIssue) {
+      const stageKey =
+        item.approval.type === "approve_requirement_package"
+          ? "requirement"
+          : item.approval.type === "approve_design_package"
+            ? "design"
+            : item.approval.type === "approve_qa_exit"
+              ? "qa"
+              : null;
+      if (!stageKey) continue;
+      if (!stageMap.get(stageKey)?.approvals.some((row) => row.approval.id === item.approval.id)) {
+        stageMap.get(stageKey)?.approvals.push(item);
+      }
     }
 
     const buckets = DELIVERY_TIMELINE.map((stage) => {
       const bucket = stageMap.get(stage.key)!;
       const openStageIssues = bucket.issues.filter((issue) => !["done", "cancelled"].includes(issue.status));
-      const latestIssue = [...bucket.issues].sort(
-        (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
-      )[0] ?? null;
+      const latestIssue = latestBy(bucket.issues, (issue) => issue.updatedAt);
       const latestAssignee = latestIssue
         ? actorLabel(resolveIssueRecipientAgentId(latestIssue), resolveIssueRecipientUserId(latestIssue), agentNameById)
         : null;
-      const pending = bucket.pendingApprovals[0] ?? null;
+      const pending =
+        latestBy(
+          bucket.approvals.filter(
+            (row) => row.approval.status === "pending" || row.approval.status === "revision_requested",
+          ),
+          (row) => row.approval.updatedAt,
+        ) ?? null;
+      const latestApproval = latestBy(bucket.approvals, (row) => row.approval.updatedAt);
       const waitingForOperatorApprovalRequest =
         Boolean(stage.gate) &&
         !pending &&
@@ -779,9 +856,10 @@ function OverviewContent({
         latestIssue,
         latestAssignee,
         pending,
+        latestApproval,
         waitingForOperatorApprovalRequest,
         hasBlocked: bucket.issues.some((issue) => issue.status === "blocked"),
-        hasActivity: bucket.issues.length > 0 || bucket.pendingApprovals.length > 0,
+        hasActivity: bucket.issues.length > 0 || bucket.approvals.length > 0,
       };
     });
 
@@ -799,7 +877,7 @@ function OverviewContent({
 
     const lastActivityIndex = buckets.reduce((acc, entry, index) => (entry.hasActivity ? index : acc), -1);
 
-    return buckets.map(({ stage, bucket, openStageIssues, latestIssue, latestAssignee, pending, waitingForOperatorApprovalRequest, hasBlocked, hasActivity }, index) => {
+    return buckets.map(({ stage, bucket, openStageIssues, latestIssue, latestAssignee, pending, latestApproval, waitingForOperatorApprovalRequest, hasBlocked, hasActivity }, index) => {
       let state: "completed" | "in_progress" | "pending_approval" | "operator_action" | "blocked" | "upcoming" = "upcoming";
       if (index === currentIndex && pending) {
         state = "pending_approval";
@@ -831,6 +909,137 @@ function OverviewContent({
         detail = latestIssue ? `Hoàn tất qua issue "${latestIssue.title}".` : "";
       }
 
+      let substeps: StageSubstep[] = [];
+      if (stage.key === "requirement") {
+        const pmIssue = latestBy(
+          bucket.issues.filter((issue) =>
+            actorLabel(resolveIssueRecipientAgentId(issue), resolveIssueRecipientUserId(issue), agentNameById)
+              .toUpperCase()
+              .includes("PM"),
+          ),
+          (issue) => issue.updatedAt,
+        );
+        const baIssue = latestBy(
+          bucket.issues.filter((issue) =>
+            actorLabel(resolveIssueRecipientAgentId(issue), resolveIssueRecipientUserId(issue), agentNameById)
+              .toUpperCase()
+              .includes("BA"),
+          ),
+          (issue) => issue.updatedAt,
+        );
+        const requirementApproval = latestApproval;
+        substeps = [
+          {
+            key: "pm-handoff-to-ba",
+            label: "PM nhận task từ CTO và giao việc cho BA",
+            status: baIssue || pmIssue?.status === "done" ? "done" : pmIssue ? "in_progress" : "waiting",
+            meta: pmIssue ? pmIssue.title : "Chưa có issue PM/BA",
+            previewIssueId: pmIssue?.id ?? null,
+          },
+          {
+            key: "ba-build-package",
+            label: "BA xây dựng requirement package và gửi PM review",
+            status: requirementApproval || baIssue?.status === "in_review" || baIssue?.status === "done"
+              ? "done"
+              : baIssue
+                ? "in_progress"
+                : "waiting",
+            meta: baIssue ? baIssue.title : "Chưa có issue BA",
+            previewIssueId: baIssue?.id ?? null,
+          },
+          {
+            key: "pm-requirement-approval",
+            label: "PM review Requirement Package",
+            status:
+              requirementApproval?.approval.status === "approved"
+                ? "done"
+                : requirementApproval?.approval.status === "rejected"
+                  ? "rejected"
+                : requirementApproval?.approval.status === "pending" || requirementApproval?.approval.status === "revision_requested"
+                  ? "pending"
+                  : "waiting",
+            meta: requirementApproval ? approvalStatusLabel(requirementApproval.approval.status) : "Chưa có approval",
+            previewIssueId:
+              requirementApproval?.approval.status === "approved" ? requirementApproval.issueId : null,
+          },
+        ];
+      } else if (stage.key === "solutioning") {
+        const techLeadIssue = latestBy(bucket.issues, (issue) => issue.updatedAt);
+        const designerIssue = latestBy(stageMap.get("design")?.issues ?? [], (issue) => issue.updatedAt);
+        const designerIssueExists = Boolean(designerIssue);
+        const solutioningHandedOff = Boolean(
+          techLeadIssue &&
+            (techLeadIssue.status === "done" ||
+              techLeadIssue.status === "in_review" ||
+              designerIssueExists),
+        );
+        substeps = [
+          {
+            key: "pm-handoff-to-tech-lead",
+            label: "PM handoff requirement package đã approve cho TECH LEAD",
+            status: techLeadIssue ? "done" : "waiting",
+            meta: techLeadIssue ? techLeadIssue.title : "Chưa có issue TECH LEAD",
+            previewIssueId: techLeadIssue?.id ?? null,
+          },
+          {
+            key: "tech-lead-solutioning",
+            label: "TECH LEAD xây technical solution và technical planning",
+            status:
+              solutioningHandedOff
+                ? "done"
+                : techLeadIssue
+                ? "in_progress"
+                : "waiting",
+            meta: techLeadIssue ? techLeadIssue.title : null,
+            previewIssueId: solutioningHandedOff ? techLeadIssue?.id ?? null : null,
+          },
+          {
+            key: "tech-lead-design-brief",
+            label: "TECH LEAD giao designer để thiết kế UX/UI",
+            status: designerIssueExists ? "done" : techLeadIssue ? "in_progress" : "waiting",
+            meta: designerIssueExists ? "Đã sinh task design" : "Chưa giao task design",
+            previewIssueId: designerIssue?.id ?? null,
+          },
+        ];
+      } else if (stage.key === "design") {
+        const designIssue = latestBy(bucket.issues, (issue) => issue.updatedAt);
+        const designApproval = latestApproval;
+        substeps = [
+          {
+            key: "tech-lead-assign-designer",
+            label: "TECH LEAD giao task UX/UI cho DESIGNER",
+            status: designIssue ? "done" : "waiting",
+            meta: designIssue ? designIssue.title : "Chưa có issue design",
+            previewIssueId: designIssue?.id ?? null,
+          },
+          {
+            key: "designer-package",
+            label: "DESIGNER hoàn tất design package",
+            status: designApproval || designIssue?.status === "in_review" || designIssue?.status === "done"
+              ? "done"
+              : designIssue
+                ? "in_progress"
+                : "waiting",
+            meta: designIssue ? designIssue.title : null,
+            previewIssueId: designIssue?.id ?? null,
+          },
+          {
+            key: "design-approval",
+            label: "PM / TECH LEAD review UX/UI approval",
+            status:
+              designApproval?.approval.status === "approved"
+                ? "done"
+                : designApproval?.approval.status === "rejected"
+                  ? "rejected"
+                : designApproval?.approval.status === "pending" || designApproval?.approval.status === "revision_requested"
+                  ? "pending"
+                  : "waiting",
+            meta: designApproval ? approvalStatusLabel(designApproval.approval.status) : "Chưa có approval",
+            previewIssueId: designApproval?.approval.status === "approved" ? designApproval.issueId : null,
+          },
+        ];
+      }
+
       return {
         ...stage,
         state,
@@ -839,9 +1048,10 @@ function OverviewContent({
         pendingApproval: pending,
         waitingForOperatorApprovalRequest,
         detail,
+        substeps,
       };
     });
-  }, [agentNameById, pendingApprovals, projectIssues]);
+  }, [agentNameById, approvalsByIssue, pendingApprovals, projectIssues]);
 
   const currentTimelineStage =
     timelineStages.find(
@@ -983,7 +1193,7 @@ function OverviewContent({
         </div>
 
         <div className="mt-5 relative">
-          <div className="absolute left-[116px] top-0 bottom-0 w-px -translate-x-1/2 bg-border/80" />
+          <div className="absolute left-[132px] top-0 bottom-0 w-px -translate-x-1/2 bg-border/80" />
           {timelineStages.map((stage, index) => (
             <div key={stage.key} className="relative grid grid-cols-[104px_24px_minmax(0,1fr)] gap-4 pb-6 last:pb-0">
               <div className="min-w-0 text-right">
@@ -1031,6 +1241,41 @@ function OverviewContent({
                     </Button>
                   ) : null}
                 </div>
+                {stage.substeps?.length ? (
+                  <div className="mt-3 rounded-lg border border-border/60 bg-muted/20 p-3">
+                    <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                      Workflow Steps
+                    </p>
+                    <div className="space-y-2">
+                      {stage.substeps.map((step) => {
+                        const Icon = substepIcon(step.status);
+                        return (
+                          <div key={step.key} className="flex items-start gap-2">
+                            <Icon className={cn("mt-0.5 h-4 w-4 shrink-0", substepIconClass(step.status), step.status === "in_progress" ? "animate-spin" : "")} />
+                            <div className="flex min-w-0 flex-1 items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="text-xs font-medium text-foreground">{step.label}</div>
+                                {step.meta ? (
+                                  <div className="text-[11px] text-muted-foreground">{step.meta}</div>
+                                ) : null}
+                              </div>
+                              {step.previewIssueId ? (
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="h-6 shrink-0 px-2 text-[10px]"
+                                  onClick={() => setPreviewIssueId(step.previewIssueId!)}
+                                >
+                                  Xem kết quả
+                                </Button>
+                              ) : null}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : null}
               </div>
             </div>
           ))}

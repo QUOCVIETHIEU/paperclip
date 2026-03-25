@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent } from "react";
 import { Link, useLocation, useNavigate, useParams } from "@/lib/router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { issuesApi } from "../api/issues";
@@ -763,7 +763,7 @@ export function IssueDetail() {
   const parentRef = issue.parentId
     ? (ancestors[0]?.identifier ?? issue.parentId.slice(0, 8))
     : "Root";
-  const workflowChain = [...ancestors]
+  const workflowSteps = [...ancestors]
     .reverse()
     .map((ancestor) => {
       const ancestorAssigneeAgentId = ancestor.assigneeAgentId ?? ancestor.lastAssignedAgentId;
@@ -772,8 +772,8 @@ export function IssueDetail() {
       if (ancestorAssigneeUserId) return compactUserLabel(ancestorAssigneeUserId, currentUserId) ?? "Board";
       return "Unassigned";
     })
-    .concat(assigneeLabel)
-    .join(" -> ");
+    .concat(assigneeLabel);
+  const workflowChain = workflowSteps.join(" -> ");
   const stageAndGate = inferStageAndGate(issue, assigneeLabel);
   const workflowApprovalAction = (() => {
     const requesterAgentName =
@@ -931,7 +931,16 @@ export function IssueDetail() {
         </div>
         <div className="min-w-0">
           <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Flow</div>
-          <div className="truncate text-sm" title={workflowChain}>{workflowChain}</div>
+          <div className="flex flex-wrap items-center gap-1 pt-0.5 text-sm" title={workflowChain}>
+            {workflowSteps.map((step, index) => (
+              <Fragment key={`${step}-${index}`}>
+                {index > 0 && <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
+                <span className="max-w-full rounded-md border border-border/70 bg-muted/30 px-2 py-0.5 break-words">
+                  {step}
+                </span>
+              </Fragment>
+            ))}
+          </div>
         </div>
         <div className="min-w-0">
           <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Stage / Gate</div>
