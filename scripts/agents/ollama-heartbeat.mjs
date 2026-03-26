@@ -119,6 +119,19 @@ async function main() {
   });
 
   await postIssueComment(issue.id, body);
+  if (shouldAutoCompleteWorkerIssue({
+    agent: me,
+    issue: context.issue,
+    approvalContext,
+  })) {
+    await apiJson(`/api/issues/${issue.id}`, {
+      method: "PATCH",
+      includeRunId: true,
+      body: {
+        status: "done",
+      },
+    });
+  }
   await apiJson(`/api/issues/${issue.id}/release`, {
     method: "POST",
     includeRunId: true,
@@ -592,6 +605,7 @@ async function maybeCreateDelegatedIssues(input) {
   const created = [];
   const skipped = [];
   const notes = [...(input.plan.diagnostics ?? [])];
+  const enforceDevelopmentDelegation = isDevelopmentCoordinatorIssue(input.parentIssue);
   for (const task of input.plan.tasks) {
     const assignee = resolveDelegationAssignee({
       task,
@@ -604,6 +618,13 @@ async function maybeCreateDelegatedIssues(input) {
         reason: task.assigneeAgentId || task.assigneeName
           ? "Không map được assignee sang direct report hợp lệ"
           : "Task thiếu assignee hợp lệ",
+      });
+      continue;
+    }
+    if (enforceDevelopmentDelegation && !isAllowedDevelopmentExecutor(assignee)) {
+      skipped.push({
+        title: task.title,
+        reason: "Gate Development chỉ được giao FE / BE / INTEGRATION / DEVOPS & SECURITY. QA sẽ mở ở Gate 6.",
       });
       continue;
     }
@@ -743,6 +764,72 @@ function readNonEmptyString(value) {
 
 function normalizeComparableTitle(value) {
   return readNonEmptyString(value).toLocaleLowerCase();
+}
+
+function normalizeIssueText(issue) {
+  return normalizeComparableTitle([
+    readNonEmptyString(issue?.title),
+    readNonEmptyString(issue?.description),
+  ].join("\n")).replace(/\s+/g, " ");
+}
+
+function isDevelopmentCoordinatorIssue(issue) {
+  const normalized = normalizeIssueText(issue);
+  if (!normalized) return false;
+  return [
+    "development plan",
+    "gate development",
+    "giao task cho fe / be / integration / devops",
+    "phan ra development plan",
+    "phân rã development plan",
+    "san sang ban giao qa",
+    "sẵn sàng bàn giao qa",
+  ].some((phrase) => normalized.includes(normalizeComparableTitle(phrase)));
+}
+
+function isAllowedDevelopmentExecutor(agent) {
+  const normalized = normalizeComparableTitle([
+    readNonEmptyString(agent?.name),
+    readNonEmptyString(agent?.title),
+    readNonEmptyString(agent?.role),
+    readNonEmptyString(agent?.capabilities),
+  ].join(" "));
+  if (!normalized) return false;
+  return [
+    "fe",
+    "frontend",
+    "be",
+    "backend",
+    "integration",
+    "devops",
+    "security",
+  ].some((phrase) => normalized.includes(phrase));
+}
+
+function isDevelopmentWorkerAgent(agent) {
+  const normalized = normalizeComparableTitle([
+    readNonEmptyString(agent?.name),
+    readNonEmptyString(agent?.title),
+    readNonEmptyString(agent?.role),
+  ].join(" "));
+  if (!normalized) return false;
+  const isExecutor = [
+    "fe",
+    "frontend",
+    "be",
+    "backend",
+    "integration",
+    "devops",
+    "security",
+  ].some((phrase) => normalized.includes(phrase));
+  const isCoordinator = normalized.includes("tech lead") || normalized.includes("technical lead");
+  return isExecutor && !isCoordinator;
+}
+
+function shouldAutoCompleteWorkerIssue(input) {
+  if (!isDevelopmentWorkerAgent(input.agent)) return false;
+  if (input.approvalContext) return false;
+  return true;
 }
 
 function inferDelegationTasksFromMarkdown(response) {
@@ -899,7 +986,38 @@ function looksLikeGateDeliverable(response, approvalContext) {
   }
 
   if (approvalContext.type === "approve_qa_exit") {
-    return countPhraseGroups(normalized, [
+    const planningOnlyQaPhrases = [
+      "test strategy",
+      "chien luoc kiem thu",
+      "chiến lược kiểm thử",
+      "test plan",
+      "ke hoach kiem thu",
+      "kế hoạch kiểm thử",
+      "test case",
+      "test cases",
+      "kiem thu case",
+      "kiểm thử case",
+      "checklist",
+      "test checklist",
+    ];
+    const hasPlanningOnlySignal = planningOnlyQaPhrases.some((phrase) =>
+      normalized.includes(normalizeComparableTitle(phrase)),
+    );
+    const executionEvidenceScore = countPhraseGroups(normalized, [
+      ["test execution", "thuc thi kiem thu", "thực thi kiểm thử"],
+      ["test result", "ket qua kiem thu", "kết quả kiểm thử"],
+      ["defect", "bug log", "defect log"],
+      ["regression", "regression result"],
+      ["sign off", "signoff", "qa sign off", "qa signoff"],
+      ["readiness", "san sang", "sẵn sàng"],
+      ["qa exit"],
+    ]);
+
+    if (hasPlanningOnlySignal && executionEvidenceScore < 2) {
+      return false;
+    }
+
+    return executionEvidenceScore >= 2 && countPhraseGroups(normalized, [
       ["pham vi kiem thu", "phạm vi kiểm thử", "test scope"],
       ["ket qua kiem thu", "kết quả kiểm thử", "test result"],
       ["defect"],
@@ -955,7 +1073,34 @@ function looksLikeStructuredDeliverable(response, approvalContext) {
     return generalScore >= 2 && countPhraseGroups(normalized, designGroups) >= 2;
   }
   if (approvalContext.type === "approve_qa_exit") {
-    return generalScore >= 2 && countPhraseGroups(normalized, qaGroups) >= 2;
+    const planningOnlyQaPhrases = [
+      "test strategy",
+      "chien luoc kiem thu",
+      "chiến lược kiểm thử",
+      "test plan",
+      "ke hoach kiem thu",
+      "kế hoạch kiểm thử",
+      "test case",
+      "test cases",
+      "checklist",
+      "test checklist",
+    ];
+    const hasPlanningOnlySignal = planningOnlyQaPhrases.some((phrase) =>
+      normalized.includes(normalizeComparableTitle(phrase)),
+    );
+    const executionGroups = [
+      ["test execution", "thuc thi kiem thu", "thực thi kiểm thử"],
+      ["test result", "ket qua kiem thu", "kết quả kiểm thử"],
+      ["defect", "bug log", "defect log"],
+      ["regression", "regression result"],
+      ["sign off", "signoff", "qa sign off", "qa signoff"],
+      ["readiness", "san sang", "sẵn sàng"],
+    ];
+    const executionScore = countPhraseGroups(normalized, executionGroups);
+    if (hasPlanningOnlySignal && executionScore < 2) {
+      return false;
+    }
+    return generalScore >= 2 && countPhraseGroups(normalized, qaGroups) >= 2 && executionScore >= 2;
   }
 
   return false;

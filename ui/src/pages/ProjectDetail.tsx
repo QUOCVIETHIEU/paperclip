@@ -54,6 +54,7 @@ type StageSubstep = {
   status: StageSubstepStatus;
   meta?: string | null;
   previewIssueId?: string | null;
+  approvalRow?: ApprovalRow | null;
 };
 
 function isProjectPluginTab(value: string | null): value is ProjectPluginTab {
@@ -279,7 +280,7 @@ function IssuePreviewDialog({
                           ? (agentNameById.get(comment.authorAgentId) ?? "Agent")
                           : comment.authorUserId
                             ? "Board"
-                            : "Unknown"}
+                            : "System"}
                       </span>
                       <span>{formatDate(comment.createdAt)}</span>
                       <span>{timeAgo(comment.createdAt)}</span>
@@ -447,6 +448,10 @@ function approvalTypeLabel(type: string) {
 }
 
 function approvalStatusLabel(status: Approval["status"]) {
+  if (status === "approved") return "Đã phê duyệt";
+  if (status === "pending") return "Đang chờ duyệt";
+  if (status === "revision_requested") return "Yêu cầu chỉnh sửa";
+  if (status === "rejected") return "Từ chối";
   return status.replaceAll("_", " ");
 }
 
@@ -456,6 +461,45 @@ function approvalStatusBadgeClass(status: Approval["status"]) {
   if (status === "revision_requested") return "border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-700 dark:text-fuchsia-300";
   if (status === "rejected") return "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300";
   return "border-border bg-muted text-muted-foreground";
+}
+
+function isIssueReviewReadyOrDone(issue?: { status?: string | null } | null) {
+  return issue?.status === "done" || issue?.status === "in_review";
+}
+
+function isIssueActuallyRunning(issue?: { status?: string | null } | null) {
+  return issue?.status === "in_progress";
+}
+
+function isQaPlanningOnlyIssue(issue?: { title?: string | null; description?: string | null } | null) {
+  const text = `${issue?.title ?? ""} ${issue?.description ?? ""}`.toLowerCase();
+  const planningSignals = [
+    "test strategy",
+    "test plan",
+    "test case",
+    "test cases",
+    "checklist",
+    "chiến lược kiểm thử",
+    "chien luoc kiem thu",
+    "kế hoạch kiểm thử",
+    "ke hoach kiem thu",
+  ];
+  const executionSignals = [
+    "test execution",
+    "test result",
+    "defect",
+    "bug log",
+    "regression",
+    "qa exit",
+    "sign off",
+    "validation",
+    "thực thi kiểm thử",
+    "kết quả kiểm thử",
+    "hồi quy",
+    "xác nhận qa",
+  ];
+  return planningSignals.some((signal) => text.includes(signal))
+    && !executionSignals.some((signal) => text.includes(signal));
 }
 
 function gateApproverLabel(stageKey: TimelineStageDef["key"]) {
@@ -538,6 +582,12 @@ function inferTimelineStageKey(
   const titleText = issue.title.toLowerCase();
   const detailText = `${issue.title}\n${issue.description ?? ""}`.toLowerCase();
 
+  // Gate 5 executor roles must remain mapped to Development even when the
+  // task title references approved UX/UI work from the previous stage.
+  if (role.includes("FE") || role.includes("BE") || role.includes("INTEGRATION") || role.includes("DEVOPS")) {
+    return "development";
+  }
+
   if (/(hypercare|handover|service desk|takeover)/.test(titleText)) return "handover";
   if (/(uat|go-live|golive|go live|release readiness)/.test(titleText)) return "uat";
   if (/(ux\/ui|ui\/ux|wireframe|prototype|design|thiết kế|thiet ke|ux flow|ui flow|ui structure)/.test(titleText)) {
@@ -567,7 +617,6 @@ function inferTimelineStageKey(
   if (role.includes("DESIGNER")) return "design";
   if (role.includes("QA")) return "qa";
   if (role.includes("SD")) return "handover";
-  if (role.includes("FE") || role.includes("BE") || role.includes("INTEGRATION") || role.includes("DEVOPS")) return "development";
   if (role.includes("TECH LEAD")) {
     return "solutioning";
   }
@@ -648,7 +697,9 @@ function OverviewContent({
   onUpdate: (data: Record<string, unknown>) => void;
   imageUploadHandler?: (file: File) => Promise<string>;
 }) {
+  const queryClient = useQueryClient();
   const [previewIssueId, setPreviewIssueId] = useState<string | null>(null);
+  const [previewApprovalId, setPreviewApprovalId] = useState<string | null>(null);
   const { data: agents } = useQuery({
     queryKey: queryKeys.agents.list(companyId),
     queryFn: () => agentsApi.list(companyId),
@@ -711,6 +762,35 @@ function OverviewContent({
     () => approvalsByIssue.filter((row) => row.approval.status === "pending" || row.approval.status === "revision_requested"),
     [approvalsByIssue],
   );
+
+  const previewApprovalRow = useMemo(() => {
+    if (!previewApprovalId) return null;
+    return approvalsByIssue.find((row) => row.approval.id === previewApprovalId) ?? null;
+  }, [approvalsByIssue, previewApprovalId]);
+
+  const approveApproval = useMutation({
+    mutationFn: (id: string) => approvalsApi.approve(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.approvals.list(companyId) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.issues.listByProject(companyId, projectId) });
+      for (const issue of projectIssues ?? []) {
+        queryClient.invalidateQueries({ queryKey: queryKeys.issues.approvals(issue.id) });
+      }
+      queryClient.invalidateQueries({ queryKey: queryKeys.projects.detail(projectId) });
+    },
+  });
+
+  const rejectApproval = useMutation({
+    mutationFn: (id: string) => approvalsApi.reject(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.approvals.list(companyId) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.issues.listByProject(companyId, projectId) });
+      for (const issue of projectIssues ?? []) {
+        queryClient.invalidateQueries({ queryKey: queryKeys.issues.approvals(issue.id) });
+      }
+      queryClient.invalidateQueries({ queryKey: queryKeys.projects.detail(projectId) });
+    },
+  });
 
   const currentIssue = useMemo(() => {
     const issues = openIssues.length > 0 ? openIssues : (projectIssues ?? []);
@@ -955,18 +1035,25 @@ function OverviewContent({
                 ? "done"
                 : requirementApproval?.approval.status === "rejected"
                   ? "rejected"
-                : requirementApproval?.approval.status === "pending" || requirementApproval?.approval.status === "revision_requested"
-                  ? "pending"
-                  : "waiting",
+                  : requirementApproval?.approval.status === "pending" || requirementApproval?.approval.status === "revision_requested"
+                    ? "pending"
+                    : "waiting",
             meta: requirementApproval ? approvalStatusLabel(requirementApproval.approval.status) : "Chưa có approval",
             previewIssueId:
               requirementApproval?.approval.status === "approved" ? requirementApproval.issueId : null,
+            approvalRow: requirementApproval,
           },
         ];
       } else if (stage.key === "solutioning") {
         const techLeadIssue = latestBy(bucket.issues, (issue) => issue.updatedAt);
         const designerIssue = latestBy(stageMap.get("design")?.issues ?? [], (issue) => issue.updatedAt);
         const designerIssueExists = Boolean(designerIssue);
+        const approvedRequirement = latestBy(
+          (stageMap.get("requirement")?.approvals ?? []).filter(
+            (row) => row.approval.status === "approved",
+          ),
+          (row) => row.approval.updatedAt,
+        );
         const solutioningHandedOff = Boolean(
           techLeadIssue &&
             (techLeadIssue.status === "done" ||
@@ -978,8 +1065,8 @@ function OverviewContent({
             key: "pm-handoff-to-tech-lead",
             label: "PM handoff requirement package đã approve cho TECH LEAD",
             status: techLeadIssue ? "done" : "waiting",
-            meta: techLeadIssue ? techLeadIssue.title : "Chưa có issue TECH LEAD",
-            previewIssueId: techLeadIssue?.id ?? null,
+            meta: approvedRequirement?.issueTitle ?? (techLeadIssue ? techLeadIssue.title : "Chưa có issue TECH LEAD"),
+            previewIssueId: approvedRequirement?.issueId ?? techLeadIssue?.id ?? null,
           },
           {
             key: "tech-lead-solutioning",
@@ -988,8 +1075,8 @@ function OverviewContent({
               solutioningHandedOff
                 ? "done"
                 : techLeadIssue
-                ? "in_progress"
-                : "waiting",
+                  ? "in_progress"
+                  : "waiting",
             meta: techLeadIssue ? techLeadIssue.title : null,
             previewIssueId: solutioningHandedOff ? techLeadIssue?.id ?? null : null,
           },
@@ -997,7 +1084,7 @@ function OverviewContent({
             key: "tech-lead-design-brief",
             label: "TECH LEAD giao designer để thiết kế UX/UI",
             status: designerIssueExists ? "done" : techLeadIssue ? "in_progress" : "waiting",
-            meta: designerIssueExists ? "Đã sinh task design" : "Chưa giao task design",
+            meta: designerIssueExists ? designerIssue?.title ?? "Đã sinh task design" : "Chưa giao task design",
             previewIssueId: designerIssue?.id ?? null,
           },
         ];
@@ -1031,11 +1118,145 @@ function OverviewContent({
                 ? "done"
                 : designApproval?.approval.status === "rejected"
                   ? "rejected"
-                : designApproval?.approval.status === "pending" || designApproval?.approval.status === "revision_requested"
-                  ? "pending"
-                  : "waiting",
+                  : designApproval?.approval.status === "pending" || designApproval?.approval.status === "revision_requested"
+                    ? "pending"
+                    : "waiting",
             meta: designApproval ? approvalStatusLabel(designApproval.approval.status) : "Chưa có approval",
             previewIssueId: designApproval?.approval.status === "approved" ? designApproval.issueId : null,
+            approvalRow: designApproval,
+          },
+        ];
+      } else if (stage.key === "development") {
+        const recipientMatches = (issue: (typeof bucket.issues)[number], role: string) =>
+          actorLabel(resolveIssueRecipientAgentId(issue), resolveIssueRecipientUserId(issue), agentNameById)
+            .toUpperCase()
+            .includes(role);
+
+        const techLeadDevIssue = latestBy(
+          bucket.issues.filter((issue) => recipientMatches(issue, "TECH LEAD")),
+          (issue) => issue.updatedAt,
+        );
+        const feIssue = latestBy(
+          bucket.issues.filter((issue) => recipientMatches(issue, "FE")),
+          (issue) => issue.updatedAt,
+        );
+        const beIssue = latestBy(
+          bucket.issues.filter((issue) => recipientMatches(issue, "BE")),
+          (issue) => issue.updatedAt,
+        );
+        const integrationIssue = latestBy(
+          bucket.issues.filter((issue) => recipientMatches(issue, "INTEGRATION")),
+          (issue) => issue.updatedAt,
+        );
+        const devopsIssue = latestBy(
+          bucket.issues.filter((issue) => recipientMatches(issue, "DEVOPS")),
+          (issue) => issue.updatedAt,
+        );
+        const qaIssue = latestBy(
+          (stageMap.get("qa")?.issues ?? []).filter((issue) => !isQaPlanningOnlyIssue(issue)),
+          (issue) => issue.updatedAt,
+        );
+        const downstreamDevAssigned = Boolean(feIssue || beIssue || integrationIssue || devopsIssue);
+        const coreDevCompleted = [feIssue, beIssue].every(
+          (issue) => issue && isIssueReviewReadyOrDone(issue),
+        );
+        const optionalInfraReady =
+          (!integrationIssue || isIssueReviewReadyOrDone(integrationIssue)) &&
+          (!devopsIssue || isIssueReviewReadyOrDone(devopsIssue));
+        const qaHandoffReady = downstreamDevAssigned && coreDevCompleted && optionalInfraReady;
+        const qaHandoffCompleted = Boolean(qaIssue && qaHandoffReady && isIssueReviewReadyOrDone(qaIssue));
+
+        substeps = [
+          {
+            key: "tech-lead-development-assignment",
+            label:
+              "TECH LEAD tổng hợp technical solution, kiểm tra hoặc tạo mới workspace dự án, reset file cũ nếu cần, rồi giao task cho FE / BE / INTEGRATION / DEVOPS",
+            status: downstreamDevAssigned ? "done" : isIssueActuallyRunning(techLeadDevIssue) ? "in_progress" : "waiting",
+            meta: downstreamDevAssigned
+              ? "Đã chuẩn bị workspace dự án sạch và giao task development cho FE / BE / INTEGRATION / DEVOPS"
+              : techLeadDevIssue
+                ? techLeadDevIssue.title
+                : "Chưa có issue TECH LEAD để tổng hợp technical solution, chuẩn bị workspace dự án và mở development",
+            previewIssueId: techLeadDevIssue?.id ?? null,
+          },
+          {
+            key: "fe-development",
+            label: "FE nhận task từ TECH LEAD và hoàn thành frontend scope",
+            status: feIssue
+              ? isIssueReviewReadyOrDone(feIssue)
+                ? "done"
+                : isIssueActuallyRunning(feIssue)
+                  ? "in_progress"
+                  : "waiting"
+              : "waiting",
+            meta: feIssue ? feIssue.title : "Chưa có issue FE",
+            previewIssueId: feIssue?.id ?? null,
+          },
+          {
+            key: "be-development",
+            label: "BE nhận task từ TECH LEAD và hoàn thành backend scope",
+            status: beIssue
+              ? isIssueReviewReadyOrDone(beIssue)
+                ? "done"
+                : isIssueActuallyRunning(beIssue)
+                  ? "in_progress"
+                  : "waiting"
+              : "waiting",
+            meta: beIssue ? beIssue.title : "Chưa có issue BE",
+            previewIssueId: beIssue?.id ?? null,
+          },
+          {
+            key: "integration-development",
+            label: "INTEGRATION thực hiện integration scope nếu có",
+            status: integrationIssue
+              ? isIssueReviewReadyOrDone(integrationIssue)
+                ? "done"
+                : isIssueActuallyRunning(integrationIssue)
+                  ? "in_progress"
+                  : "waiting"
+              : downstreamDevAssigned
+                ? "done"
+                : "waiting",
+            meta: integrationIssue
+              ? integrationIssue.title
+              : downstreamDevAssigned
+                ? "Không có integration scope"
+                : "Chưa có issue INTEGRATION",
+            previewIssueId: integrationIssue?.id ?? null,
+          },
+          {
+            key: "devops-development",
+            label: "DEVOPS & SECURITY chuẩn bị môi trường và deployment readiness nếu có",
+            status: devopsIssue
+              ? isIssueReviewReadyOrDone(devopsIssue)
+                ? "done"
+                : isIssueActuallyRunning(devopsIssue)
+                  ? "in_progress"
+                  : "waiting"
+              : downstreamDevAssigned
+                ? "done"
+                : "waiting",
+            meta: devopsIssue
+              ? devopsIssue.title
+              : downstreamDevAssigned
+                ? "Không có hạ tầng riêng cần chuẩn bị"
+                : "Chưa có issue DEVOPS & SECURITY",
+            previewIssueId: devopsIssue?.id ?? null,
+          },
+          {
+            key: "tech-lead-qa-readiness",
+            label: "TECH LEAD tổng hợp build/module và xác nhận sẵn sàng bàn giao QA",
+            status: qaHandoffCompleted
+              ? "done"
+              : qaHandoffReady && isIssueActuallyRunning(techLeadDevIssue)
+                ? "in_progress"
+                : "waiting",
+            meta: qaHandoffCompleted
+              ? "Đã bàn giao QA"
+              : qaHandoffReady && isIssueActuallyRunning(techLeadDevIssue)
+                ? "Build/module đang được TECH LEAD chốt để bàn giao QA"
+                : "Chưa sẵn sàng bàn giao QA",
+            previewIssueId: qaHandoffCompleted ? qaIssue?.id ?? null : null,
           },
         ];
       }
@@ -1155,7 +1376,7 @@ function OverviewContent({
           <div>
             <h3 className="text-base font-semibold">Delivery Timeline</h3>
             <p className="text-sm text-muted-foreground">
-              Theo doi 8 giai doan delivery, biet ngay du an dang o dau va co dang ket gate hay khong.
+              Theo dõi tiến độ dự án qua các giai đoạn chính từ Intake đến QA, bao gồm các gate cần phê duyệt và các issue liên quan.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -1230,7 +1451,7 @@ function OverviewContent({
                         ? `Updated ${timeAgo(stage.latestIssue.updatedAt)}`
                         : "Chưa có hoạt động nào"}
                   </p>
-                  {stage.state === "completed" && stage.latestIssue ? (
+                  {stage.state === "completed" && stage.latestIssue && !stage.substeps?.length ? (
                     <Button
                       variant="outline"
                       size="sm"
@@ -1252,22 +1473,62 @@ function OverviewContent({
                         return (
                           <div key={step.key} className="flex items-start gap-2">
                             <Icon className={cn("mt-0.5 h-4 w-4 shrink-0", substepIconClass(step.status), step.status === "in_progress" ? "animate-spin" : "")} />
-                            <div className="flex min-w-0 flex-1 items-start justify-between gap-3">
+                            <div className="min-w-0 flex-1">
                               <div className="min-w-0">
                                 <div className="text-xs font-medium text-foreground">{step.label}</div>
                                 {step.meta ? (
                                   <div className="text-[11px] text-muted-foreground">{step.meta}</div>
                                 ) : null}
                               </div>
-                              {step.previewIssueId ? (
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  className="h-6 shrink-0 px-2 text-[10px]"
-                                  onClick={() => setPreviewIssueId(step.previewIssueId!)}
-                                >
-                                  Xem kết quả
-                                </Button>
+                              {(step.previewIssueId &&
+                                step.status === "done" &&
+                                !(step.approvalRow && step.approvalRow.approval.status === "approved")) ||
+                              (step.approvalRow &&
+                                (step.approvalRow.approval.status === "pending" ||
+                                  step.approvalRow.approval.status === "revision_requested")) ? (
+                                <div className="mt-1 flex flex-wrap items-center gap-2">
+                                  {step.previewIssueId &&
+                                  step.status === "done" &&
+                                  !(step.approvalRow && step.approvalRow.approval.status === "approved") ? (
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      className="h-6 px-2 text-[10px]"
+                                      onClick={() => setPreviewIssueId(step.previewIssueId!)}
+                                    >
+                                      {step.key === "pm-handoff-to-tech-lead" ? "Xem Requirement" : "Xem kết quả"}
+                                    </Button>
+                                  ) : null}
+                                  {step.approvalRow &&
+                                  (step.approvalRow.approval.status === "pending" ||
+                                    step.approvalRow.approval.status === "revision_requested") ? (
+                                    <>
+                                      <Button
+                                        size="sm"
+                                        className="h-6 bg-green-700 px-2 text-[10px] text-white hover:bg-green-600"
+                                        onClick={() => approveApproval.mutate(step.approvalRow!.approval.id)}
+                                        disabled={approveApproval.isPending || rejectApproval.isPending}
+                                      >
+                                        Approve
+                                      </Button>
+                                      <Button
+                                        variant="destructive"
+                                        size="sm"
+                                        className="h-6 px-2 text-[10px]"
+                                        onClick={() => rejectApproval.mutate(step.approvalRow!.approval.id)}
+                                        disabled={approveApproval.isPending || rejectApproval.isPending}
+                                      >
+                                        Reject
+                                      </Button>
+                                    </>
+                                  ) : null}
+                                </div>
+                              ) : null}
+                              {step.approvalRow?.approval.status === "approved" ? (
+                                <div className="mt-1 inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700">
+                                  <ShieldCheck className="h-3 w-3" />
+                                  Approved
+                                </div>
                               ) : null}
                             </div>
                           </div>
@@ -1285,11 +1546,30 @@ function OverviewContent({
       <IssuePreviewDialog
         companyId={companyId}
         issueId={previewIssueId}
-        approvalRow={null}
+        approvalRow={previewApprovalRow}
         open={Boolean(previewIssueId)}
         onOpenChange={(open) => {
-          if (!open) setPreviewIssueId(null);
+          if (!open) {
+            setPreviewIssueId(null);
+            setPreviewApprovalId(null);
+          }
         }}
+        onApprove={(approvalId) =>
+          approveApproval.mutate(approvalId, {
+            onSuccess: () => {
+              setPreviewIssueId(null);
+              setPreviewApprovalId(null);
+            },
+          })
+        }
+        onReject={(approvalId) =>
+          rejectApproval.mutate(approvalId, {
+            onSuccess: () => {
+              setPreviewIssueId(null);
+              setPreviewApprovalId(null);
+            },
+          })
+        }
       />
     </div>
   );

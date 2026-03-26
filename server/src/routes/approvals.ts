@@ -1,3 +1,5 @@
+import { mkdir, readdir, rm } from "node:fs/promises";
+import path from "node:path";
 import { Router } from "express";
 import type { Db } from "@paperclipai/db";
 import {
@@ -16,6 +18,7 @@ import {
   issueApprovalService,
   issueService,
   logActivity,
+  projectService,
   secretService,
 } from "../services/index.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
@@ -99,6 +102,14 @@ function buildTechLeadHandoffTitle(sourceTitle: string | null | undefined) {
   return "Xây dựng technical solution và kế hoạch kỹ thuật từ Requirement Package đã approved";
 }
 
+function buildDevelopmentHandoffTitle(sourceTitle: string | null | undefined) {
+  const subject = extractProjectSubjectFromTitle(sourceTitle);
+  if (subject) {
+    return `Phân rã development plan và giao task cho FE / BE / INTEGRATION / DEVOPS cho dự án ${subject}`;
+  }
+  return "Phân rã development plan và giao task cho FE / BE / INTEGRATION / DEVOPS";
+}
+
 export function approvalRoutes(db: Db) {
   const router = Router();
   const svc = approvalService(db);
@@ -106,8 +117,67 @@ export function approvalRoutes(db: Db) {
   const heartbeat = heartbeatService(db);
   const issueApprovalsSvc = issueApprovalService(db);
   const issuesSvc = issueService(db);
+  const projectsSvc = projectService(db);
   const secretsSvc = secretService(db);
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
+
+  async function ensureDevelopmentProjectWorkspace(projectId: string | null | undefined) {
+    if (!projectId) {
+      return { workspaceId: null as string | null, workspaceDir: null as string | null };
+    }
+
+    const project = await projectsSvc.getById(projectId);
+    if (!project) {
+      return { workspaceId: null as string | null, workspaceDir: null as string | null };
+    }
+
+    const projectsRoot = path.resolve(process.cwd(), "projects");
+    const workspaceSlug = project.urlKey?.trim() || project.id;
+    const workspaceDir = path.resolve(projectsRoot, workspaceSlug);
+    if (!workspaceDir.startsWith(`${projectsRoot}${path.sep}`) && workspaceDir !== projectsRoot) {
+      throw new Error(`Resolved workspace path escaped projects root: ${workspaceDir}`);
+    }
+
+    await mkdir(workspaceDir, { recursive: true });
+    const existingEntries = await readdir(workspaceDir, { withFileTypes: true });
+    for (const entry of existingEntries) {
+      await rm(path.join(workspaceDir, entry.name), { recursive: true, force: true });
+    }
+
+    const workspaces = await projectsSvc.listWorkspaces(projectId);
+    const primaryWorkspace =
+      workspaces.find((workspace) => workspace.isPrimary) ??
+      workspaces[0] ??
+      null;
+
+    const desiredMetadata = {
+      managedBy: "design_approval_handoff",
+      managedWorkflow: "gate5_development_workspace",
+    } as Record<string, unknown>;
+
+    const syncedWorkspace = primaryWorkspace
+      ? await projectsSvc.updateWorkspace(projectId, primaryWorkspace.id, {
+          cwd: workspaceDir,
+          sourceType: "local_path",
+          isPrimary: true,
+          metadata: {
+            ...((primaryWorkspace.metadata as Record<string, unknown> | null) ?? {}),
+            ...desiredMetadata,
+          },
+        })
+      : await projectsSvc.createWorkspace(projectId, {
+          name: `${project.name} Development Workspace`,
+          cwd: workspaceDir,
+          sourceType: "local_path",
+          isPrimary: true,
+          metadata: desiredMetadata,
+        });
+
+    return {
+      workspaceId: syncedWorkspace?.id ?? null,
+      workspaceDir,
+    };
+  }
 
   async function applyLinkedIssueApprovalOutcome(
     approval: Awaited<ReturnType<typeof svc.getById>>,
@@ -389,6 +459,179 @@ export function approvalRoutes(db: Db) {
     };
   }
 
+  async function automateDesignApprovalHandoff(input: {
+    approval: Awaited<ReturnType<typeof svc.getById>>;
+    linkedIssues: Awaited<ReturnType<typeof issueApprovalsSvc.listIssuesForApproval>>;
+    resumeIssue: Awaited<ReturnType<typeof issuesSvc.getById>>;
+    coordinatorAgentId: string | null;
+    requestedByUserId: string;
+  }) {
+    const { approval, linkedIssues, resumeIssue, coordinatorAgentId, requestedByUserId } = input;
+    if (approval.type !== "approve_design_package" || !resumeIssue) {
+      return { handled: false as const, developmentIssueId: null as string | null, wakeRunId: null as string | null };
+    }
+
+    const designIssue = linkedIssues[0] ? await issuesSvc.getById(linkedIssues[0].id) : null;
+    const techLeadAgent =
+      coordinatorAgentId ? await agentsSvc.getById(coordinatorAgentId) : null;
+    if (!techLeadAgent) {
+      return { handled: false as const, developmentIssueId: null as string | null, wakeRunId: null as string | null };
+    }
+    const { workspaceId: developmentWorkspaceId, workspaceDir } = await ensureDevelopmentProjectWorkspace(
+      resumeIssue.projectId,
+    );
+
+    const childIssues = await issuesSvc.list(approval.companyId, { parentId: resumeIssue.id });
+    const developmentTitlePattern =
+      /(development|phát triển|trien khai|triển khai|frontend|backend|integration|devops|deployment readiness|build ready)/i;
+    const existingDevelopmentIssue =
+      childIssues.find(
+        (issue) =>
+          issue.assigneeAgentId === techLeadAgent.id &&
+          issue.status !== "done" &&
+          issue.status !== "cancelled" &&
+          developmentTitlePattern.test(issue.title),
+      ) ?? null;
+
+    const latestDesignComment = designIssue
+      ? await issuesSvc.listComments(designIssue.id, { order: "desc", limit: 1 }).then((rows) => rows[0] ?? null)
+      : null;
+    const designSummary = summarizeCommentBody(latestDesignComment?.body, 400);
+
+    const developmentIssue =
+      existingDevelopmentIssue ??
+      (await issuesSvc.create(approval.companyId, {
+        projectId: resumeIssue.projectId,
+        projectWorkspaceId: developmentWorkspaceId ?? resumeIssue.projectWorkspaceId,
+        goalId: resumeIssue.goalId,
+        parentId: resumeIssue.id,
+        title: buildDevelopmentHandoffTitle(designIssue?.title ?? resumeIssue.title),
+        description: [
+          "UX/UI Design đã được approve và sẵn sàng bước sang Development.",
+          designIssue
+            ? `Nguồn thiết kế: ${designIssue.identifier ?? designIssue.id} - ${designIssue.title}`
+            : null,
+          `Issue điều phối kỹ thuật: ${resumeIssue.identifier ?? resumeIssue.id} - ${resumeIssue.title}`,
+          designSummary ? `Tóm tắt đầu ra DESIGNER: ${designSummary}` : null,
+          workspaceDir ? `Workspace dự án chuẩn: ${workspaceDir}` : null,
+          workspaceDir
+            ? "TECH LEAD phải bảo đảm workspace này đã được tạo mới nếu chưa có, hoặc reset sạch toàn bộ file cũ nếu đã tồn tại, trước khi giao task cho FE / BE / INTEGRATION / DEVOPS & SECURITY."
+            : null,
+          "",
+          "Mục tiêu bước tiếp theo:",
+          "- TECH LEAD chuẩn bị workspace dự án, phân rã development plan",
+          "- Giao task cho FE / BE / INTEGRATION / DEVOPS & SECURITY khi cần",
+          "- Tổng hợp build/module sẵn sàng bàn giao QA",
+        ]
+          .filter(Boolean)
+          .join("\n"),
+        status: "todo",
+        priority: resumeIssue.priority,
+        assigneeAgentId: techLeadAgent.id,
+        requestDepth: resumeIssue.requestDepth + 1,
+        createdByAgentId: coordinatorAgentId,
+      }));
+
+    if (existingDevelopmentIssue && developmentWorkspaceId && existingDevelopmentIssue.projectWorkspaceId !== developmentWorkspaceId) {
+      await issuesSvc.update(existingDevelopmentIssue.id, {
+        projectWorkspaceId: developmentWorkspaceId,
+      });
+    }
+
+    if (!existingDevelopmentIssue) {
+      await logActivity(db, {
+        companyId: approval.companyId,
+        actorType: "user",
+        actorId: requestedByUserId,
+        agentId: coordinatorAgentId,
+        action: "issue.created",
+        entityType: "issue",
+        entityId: developmentIssue.id,
+        details: {
+          identifier: developmentIssue.identifier,
+          title: developmentIssue.title,
+          sourceApprovalId: approval.id,
+        },
+      });
+    }
+
+    const coordinatorComment = await issuesSvc.addComment(
+      resumeIssue.id,
+      [
+        `UX/UI Design đã được approve qua gate ${approval.id.slice(0, 8)}.`,
+        `Đã bàn giao tiếp sang Development: ${developmentIssue.identifier ?? developmentIssue.id} - ${developmentIssue.title}.`,
+      ].join("\n"),
+      {},
+    );
+    await issuesSvc.update(resumeIssue.id, { status: "done" });
+
+    const developmentComment = await issuesSvc.addComment(
+      developmentIssue.id,
+      [
+        "UX/UI Design đã được PM / TECH LEAD review và approve.",
+        designIssue
+          ? `Nguồn design: ${designIssue.identifier ?? designIssue.id} - ${designIssue.title}`
+          : null,
+        `Hãy bắt đầu gate Development từ issue điều phối ${resumeIssue.identifier ?? resumeIssue.id}.`,
+        workspaceDir ? `Workspace dự án đã sẵn sàng tại: ${workspaceDir}` : null,
+        workspaceDir
+          ? "Nếu FE / BE không thấy workspace hoặc workspace bị reset sai cấu trúc, hãy phản hồi lại cho TECH LEAD để chuẩn bị lại trước khi bắt đầu code."
+          : null,
+        "Bước tiếp theo mong đợi:",
+        "- Chuẩn bị hoặc reset workspace dự án và phân rã development plan",
+        "- Giao task cho FE / BE / INTEGRATION / DEVOPS & SECURITY",
+        "- Chuẩn bị build/module sẵn sàng bàn giao QA",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      {},
+    );
+
+    const wakeRun = await heartbeat.wakeup(techLeadAgent.id, {
+      source: "automation",
+      triggerDetail: "system",
+      reason: "design_approval_handoff",
+      payload: {
+        issueId: developmentIssue.id,
+        mutation: "approval_handoff",
+        approvalId: approval.id,
+        commentId: developmentComment.id,
+      },
+      requestedByActorType: "user",
+      requestedByActorId: requestedByUserId,
+      contextSnapshot: {
+        source: "approval.approved.design_handoff",
+        approvalId: approval.id,
+        issueId: developmentIssue.id,
+        taskId: developmentIssue.id,
+        wakeReason: "design_approval_handoff",
+        wakeCommentId: developmentComment.id,
+      },
+    });
+
+    await logActivity(db, {
+      companyId: approval.companyId,
+      actorType: "user",
+      actorId: requestedByUserId,
+      action: "approval.design_handoff_created",
+      entityType: "approval",
+      entityId: approval.id,
+      details: {
+        coordinatorIssueId: resumeIssue.id,
+        coordinatorCommentId: coordinatorComment.id,
+        techLeadAgentId: techLeadAgent.id,
+        developmentIssueId: developmentIssue.id,
+        wakeRunId: wakeRun?.id ?? null,
+      },
+    });
+
+    return {
+      handled: true as const,
+      developmentIssueId: developmentIssue.id,
+      wakeRunId: wakeRun?.id ?? null,
+    };
+  }
+
   router.get("/companies/:companyId/approvals", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
@@ -495,11 +738,19 @@ export function approvalRoutes(db: Db) {
         coordinatorAgentId: wakeAgentId,
         requestedByUserId: req.actor.userId ?? "board",
       });
+      const designHandoff = await automateDesignApprovalHandoff({
+        approval,
+        linkedIssues,
+        resumeIssue,
+        coordinatorAgentId: wakeAgentId,
+        requestedByUserId: req.actor.userId ?? "board",
+      });
 
       if (
         resumeIssue &&
         wakeAgentId &&
         !requirementHandoff.handled &&
+        !designHandoff.handled &&
         resumeIssue.status !== "done" &&
         resumeIssue.status !== "cancelled" &&
         (resumeIssue.assigneeAgentId !== wakeAgentId || resumeIssue.assigneeUserId !== null)
@@ -523,10 +774,11 @@ export function approvalRoutes(db: Db) {
           requestedByAgentId: approval.requestedByAgentId,
           linkedIssueIds,
           techLeadIssueId: requirementHandoff.techLeadIssueId,
+          developmentIssueId: designHandoff.developmentIssueId,
         },
       });
 
-      if (wakeAgentId && !requirementHandoff.handled) {
+      if (wakeAgentId && !requirementHandoff.handled && !designHandoff.handled) {
         try {
           const wakeRun = await heartbeat.wakeup(wakeAgentId, {
             source: "automation",
